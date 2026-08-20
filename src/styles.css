@@ -255,6 +255,9 @@ a { color: inherit; }
 .panel-icon { width: 32px; height: 32px; display: grid; place-items: center; color: #557f9b; background: #e4edf5; border-radius: 5px; }
 .panel-icon-mint { color: #4e8c70; background: #e1f1e7; }
 .check-form-panel label { display: grid; gap: 6px; color: #7b8997; font-size: 10px; margin-bottom: 13px; }
+.field-label-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.text-action { border: 0; padding: 0; background: transparent; color: #4f8a6c; cursor: pointer; font: inherit; font-size: 9px; }
+.text-action:hover { color: #2f694e; text-decoration: underline; }
 .check-form-panel input, .check-form-panel select, .check-form-panel textarea { width: 100%; border: 1px solid var(--line); background: #fbfcfd; border-radius: 4px; padding: 8px 9px; outline: 0; color: var(--ink); font-size: 11px; }
 .check-form-panel input, .check-form-panel select { height: 35px; padding-top: 0; padding-bottom: 0; }
 .check-form-panel textarea { resize: vertical; min-height: 70px; line-height: 1.5; }
@@ -328,6 +331,7 @@ a { color: inherit; }
 .check-response-note { margin-top: 14px; padding: 10px 11px; color: #718092; background: #f6f8fa; font-size: 10px; line-height: 1.5; display: grid; gap: 4px; overflow-wrap: anywhere; }
 .check-response-note strong { color: #526b7e; font-size: 12px; }
 .check-response-note span { display: block; }
+.check-response-warning { color: #9a6b34; }
 .output-preview-trigger { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; padding: 8px 9px; border: 1px solid #d9e5df; background: #f4faf6; color: #4c8064; font-size: 10px; text-align: left; cursor: pointer; }
 .output-preview-trigger span:nth-child(2) { margin-left: auto; color: #8a9c91; font-size: 9px; }
 .output-preview-trigger svg { flex: 0 0 auto; }

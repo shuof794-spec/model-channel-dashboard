@@ -127,6 +127,14 @@ def empty_metrics(endpoint: str) -> dict[str, Any]:
         "protocol": "未知",
         "security": "HTTPS" if endpoint.lower().startswith("https://") else "HTTP 风险",
         "responseModel": None,
+        "requestedMaxTokens": None,
+        "tokenParameter": "max_tokens",
+        "finishReason": None,
+        "fallbackAttempted": False,
+        "fallbackParameter": None,
+        "initialOutputTokens": None,
+        "fallbackOutputTokens": None,
+        "fallbackMessage": None,
         "usage": None,
         "outputPreview": "",
         "connectionModeUsed": None,
@@ -158,19 +166,23 @@ def parse_choice(payload: dict[str, Any]) -> tuple[str, str | None]:
     return "", payload.get("model")
 
 
-async def perform_once(request: dict[str, Any], mode: str) -> dict[str, Any]:
+async def perform_once(request: dict[str, Any], mode: str, token_parameter: str = "max_tokens") -> dict[str, Any]:
     endpoint = endpoint_for(str(request.get("apiBase") or ""))
     metrics = empty_metrics(endpoint)
     started = time.perf_counter()
     proxy = str(request.get("proxy") or os.environ.get("HTTPS_PROXY") or "").strip()
     proxies = {"http": proxy, "https": proxy} if mode == "proxy" and proxy else None
+    requested_max_tokens = max(16, min(4096, int(number(request.get("maxTokens")) or 512)))
     payload = {
         "model": str(request.get("model") or "").strip(),
         "messages": [{"role": "user", "content": str(request.get("prompt") or "请只回复：测试成功")}],
         "stream": True,
-        "max_tokens": max(1, int(number(request.get("maxTokens")) or 32)),
         "temperature": 0,
     }
+    if token_parameter == "max_completion_tokens":
+        payload["max_completion_tokens"] = requested_max_tokens
+    else:
+        payload["max_tokens"] = requested_max_tokens
     headers = {
         "Authorization": f"Bearer {str(request.get('apiKey') or '').strip()}",
         "Accept": "text/event-stream, application/json",
@@ -183,6 +195,7 @@ async def perform_once(request: dict[str, Any], mode: str) -> dict[str, Any]:
     usage = None
     response_model = None
     first_token_at = None
+    finish_reason = None
     try:
         timeout = aiohttp.ClientTimeout(total=35, connect=10)
         async with aiohttp.ClientSession(trust_env=False) as session:
@@ -223,6 +236,9 @@ async def perform_once(request: dict[str, Any], mode: str) -> dict[str, Any]:
                                 event = json.loads(data)
                             except json.JSONDecodeError:
                                 continue
+                            choices = event.get("choices") or []
+                            if choices and isinstance(choices[0], dict):
+                                finish_reason = choices[0].get("finish_reason") or finish_reason
                             if event.get("usage"):
                                 usage = event["usage"]
                             text, model_name = parse_choice(event)
@@ -244,6 +260,9 @@ async def perform_once(request: dict[str, Any], mode: str) -> dict[str, Any]:
                                 event = json.loads(data)
                             except json.JSONDecodeError:
                                 event = {}
+                            choices = event.get("choices") or []
+                            if choices and isinstance(choices[0], dict):
+                                finish_reason = choices[0].get("finish_reason") or finish_reason
                             if event.get("usage"):
                                 usage = event["usage"]
                 else:
@@ -253,6 +272,9 @@ async def perform_once(request: dict[str, Any], mode: str) -> dict[str, Any]:
                         event = {}
                     if isinstance(event, dict):
                         usage = event.get("usage")
+                        choices = event.get("choices") or []
+                        if choices and isinstance(choices[0], dict):
+                            finish_reason = choices[0].get("finish_reason") or finish_reason
                         text, response_model = parse_choice(event)
                         if text:
                             first_token_at = time.perf_counter()
@@ -300,11 +322,17 @@ async def perform_once(request: dict[str, Any], mode: str) -> dict[str, Any]:
         metrics["streamStability"] = "正常" if is_sse and first_token_at else ("无流式 token" if is_sse else "非流式响应")
         metrics["costAccuracy"] = "已返回 usage" if usage else "未提供 usage"
         metrics["responseModel"] = response_model
+        metrics["requestedMaxTokens"] = requested_max_tokens
+        metrics["tokenParameter"] = token_parameter
+        metrics["finishReason"] = finish_reason
         metrics["usage"] = usage
         metrics["outputPreview"] = output_text[:500]
+        message = f"请求成功，读取到 {int(token_count)} 个输出 token" if has_output else "HTTP 请求成功，但没有读取到输出 token。渠道可能返回了空流，或使用了未兼容的流式字段。"
+        if finish_reason == "length" and has_output and token_count < requested_max_tokens:
+            message = f"渠道在 {int(token_count)} 个输出 token 处停止（finish_reason=length）；本次请求上限为 {requested_max_tokens}。"
         return {
             "ok": has_output,
-            "message": f"请求成功，读取到 {int(token_count)} 个输出 token" if has_output else "HTTP 请求成功，但没有读取到输出 token。渠道可能返回了空流，或使用了未兼容的流式字段。",
+            "message": message,
             "metrics": metrics,
         }
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
@@ -328,6 +356,41 @@ async def async_main() -> None:
         if result.get("ok") or candidate == modes[-1] or result.get("metrics", {}).get("statusCode") is not None:
             break
     result = result or {"ok": False, "message": "未执行检测"}
+    # Some OpenAI-compatible relays only honor max_completion_tokens. Retry
+    # only when the first response explicitly hit a low length limit; normal
+    # successful responses remain a single request for accurate timing.
+    metrics = result.get("metrics") or {}
+    requested = max(16, min(4096, int(number(request.get("maxTokens")) or 512)))
+    output_tokens = number(metrics.get("outputTokens"))
+    if (
+        result.get("ok")
+        and metrics.get("finishReason") == "length"
+        and output_tokens is not None
+        and output_tokens < requested
+    ):
+        # Preserve the network path used by the successful first request. In
+        # auto mode this prevents a parameter compatibility retry from
+        # unexpectedly switching a working direct connection to a proxy.
+        fallback_mode = str(metrics.get("connectionModeUsed") or modes[-1])
+        metrics["fallbackAttempted"] = True
+        metrics["fallbackParameter"] = "max_completion_tokens"
+        metrics["initialOutputTokens"] = int(output_tokens)
+        fallback = await perform_once(request, fallback_mode, "max_completion_tokens")
+        fallback_metrics = fallback.get("metrics") or {}
+        fallback_output = number(fallback_metrics.get("outputTokens"))
+        if fallback.get("ok") and fallback_output is not None and fallback_output > output_tokens:
+            fallback_metrics["fallbackAttempted"] = True
+            fallback_metrics["fallbackParameter"] = "max_completion_tokens"
+            fallback_metrics["initialOutputTokens"] = int(output_tokens)
+            fallback_metrics["fallbackOutputTokens"] = int(fallback_output)
+            fallback_metrics["fallbackMessage"] = f"备用参数有效：输出由 {int(output_tokens)} 增加到 {int(fallback_output)} Token。"
+            fallback["metrics"] = fallback_metrics
+            fallback["message"] = f"已使用 max_completion_tokens 重试，读取到 {int(fallback_output)} 个输出 token。"
+            result = fallback
+        else:
+            metrics["fallbackOutputTokens"] = int(fallback_output) if fallback_output is not None else None
+            metrics["fallbackMessage"] = fallback.get("message") or "备用 Token 参数未被渠道接受"
+            result["metrics"] = metrics
     # Escaped Unicode is decoded back to normal text by JSON.parse in server.mjs.
     print(json.dumps(result, ensure_ascii=True, separators=(",", ":")))
 
