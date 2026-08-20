@@ -1,0 +1,46 @@
+[
+  {
+    "url": "https://api.bianxieai.com",
+    "name": "Bianxieai",
+    "pricingUrl": "https://api.bianxieai.com",
+    "apiBase": "https://api.bianxieai.com/v1",
+    "source": "relaywatch爬取",
+    "exchangeRate": 7.3,
+    "billingUnit": "USD",
+    "category": "transit"
+  },
+  {
+    "url": "https://apipool.net",
+    "name": "Apipool",
+    "pricingUrl": "https://apipool.net",
+    "apiBase": "https://api.apipool.net/v1",
+    "source": "relaywatch爬取",
+    "exchangeRate": 7.3,
+    "billingUnit": "USD",
+    "category": "transit"
+  },
+  {
+    "url": "https://apichina.esencloud.com",
+    "name": "ESEN",
+    "pricingUrl": "https://apichina.esencloud.com",
+    "apiBase": "https://apichina.esencloud.com/v1",
+    "source": "relaywatch爬取",
+    "exchangeRate": 1,
+    "billingUnit": "CNY",
+    "category": "transit",
+    "connectionMode": "proxy",
+    "lastConnectionMode": "proxy"
+  },
+  {
+    "url": "https://relaydance.com",
+    "name": "Relaydance",
+    "pricingUrl": "https://relaydance.com/",
+    "apiBase": "https://relaydance.com/v1",
+    "source": "relaywatch爬取",
+    "connectionMode": "auto",
+    "lastConnectionMode": "proxy",
+    "exchangeRate": 6.8,
+    "billingUnit": "代币",
+    "category": "transit"
+  }
+]

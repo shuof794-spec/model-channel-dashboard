@@ -1,0 +1,9 @@
+httpx
+aiohttp
+requests
+urllib3
+openpyxl
+fastapi
+uvicorn
+psycopg[binary]
+redis
