@@ -135,6 +135,7 @@ def empty_metrics(endpoint: str) -> dict[str, Any]:
         "initialOutputTokens": None,
         "fallbackOutputTokens": None,
         "fallbackMessage": None,
+        "fallbackAttempts": [],
         "usage": None,
         "outputPreview": "",
         "connectionModeUsed": None,
@@ -356,9 +357,9 @@ async def async_main() -> None:
         if result.get("ok") or candidate == modes[-1] or result.get("metrics", {}).get("statusCode") is not None:
             break
     result = result or {"ok": False, "message": "未执行检测"}
-    # Some OpenAI-compatible relays only honor max_completion_tokens. Retry
-    # only when the first response explicitly hit a low length limit; normal
-    # successful responses remain a single request for accurate timing.
+    # OpenAI-compatible relays disagree on the name of the output limit. Retry
+    # aliases only after an explicit low length stop; normal responses remain a
+    # single request so their timing is not polluted by compatibility probes.
     metrics = result.get("metrics") or {}
     requested = max(16, min(4096, int(number(request.get("maxTokens")) or 512)))
     output_tokens = number(metrics.get("outputTokens"))
@@ -373,24 +374,41 @@ async def async_main() -> None:
         # unexpectedly switching a working direct connection to a proxy.
         fallback_mode = str(metrics.get("connectionModeUsed") or modes[-1])
         metrics["fallbackAttempted"] = True
-        metrics["fallbackParameter"] = "max_completion_tokens"
         metrics["initialOutputTokens"] = int(output_tokens)
-        fallback = await perform_once(request, fallback_mode, "max_completion_tokens")
-        fallback_metrics = fallback.get("metrics") or {}
-        fallback_output = number(fallback_metrics.get("outputTokens"))
-        if fallback.get("ok") and fallback_output is not None and fallback_output > output_tokens:
+        best_result = result
+        best_output = output_tokens
+        attempts = []
+        for parameter in ("max_completion_tokens", "max_output_tokens", "max_new_tokens"):
+            fallback = await perform_once(request, fallback_mode, parameter)
+            fallback_metrics = fallback.get("metrics") or {}
+            fallback_output = number(fallback_metrics.get("outputTokens"))
+            attempts.append({
+                "parameter": parameter,
+                "ok": bool(fallback.get("ok")),
+                "outputTokens": int(fallback_output) if fallback_output is not None else None,
+                "finishReason": fallback_metrics.get("finishReason"),
+                "message": fallback.get("message") or "未返回说明",
+            })
+            if fallback.get("ok") and fallback_output is not None and fallback_output > best_output:
+                best_result = fallback
+                best_output = fallback_output
+        metrics["fallbackAttempts"] = attempts
+        metrics["fallbackOutputTokens"] = int(best_output) if best_output is not None else None
+        if best_result is not result:
+            fallback_metrics = best_result.get("metrics") or {}
             fallback_metrics["fallbackAttempted"] = True
-            fallback_metrics["fallbackParameter"] = "max_completion_tokens"
+            fallback_metrics["fallbackParameter"] = next(item["parameter"] for item in attempts if item["outputTokens"] == int(best_output))
             fallback_metrics["initialOutputTokens"] = int(output_tokens)
-            fallback_metrics["fallbackOutputTokens"] = int(fallback_output)
-            fallback_metrics["fallbackMessage"] = f"备用参数有效：输出由 {int(output_tokens)} 增加到 {int(fallback_output)} Token。"
-            fallback["metrics"] = fallback_metrics
-            fallback["message"] = f"已使用 max_completion_tokens 重试，读取到 {int(fallback_output)} 个输出 token。"
-            result = fallback
+            fallback_metrics["fallbackOutputTokens"] = int(best_output)
+            fallback_metrics["fallbackAttempts"] = attempts
+            fallback_metrics["fallbackMessage"] = f"备用参数有效：输出由 {int(output_tokens)} 增加到 {int(best_output)} Token。"
+            best_result["metrics"] = fallback_metrics
+            best_result["message"] = f"已使用 {fallback_metrics['fallbackParameter']} 重试，读取到 {int(best_output)} 个输出 token。"
+            result = best_result
         else:
-            metrics["fallbackOutputTokens"] = int(fallback_output) if fallback_output is not None else None
-            metrics["fallbackMessage"] = fallback.get("message") or "备用 Token 参数未被渠道接受"
+            metrics["fallbackMessage"] = f"已尝试 max_completion_tokens、max_output_tokens、max_new_tokens，输出仍为 {int(output_tokens)} Token；渠道或账号可能存在硬限制。"
             result["metrics"] = metrics
+            result["message"] = f"渠道在 {int(output_tokens)} 个输出 token 处停止（finish_reason=length）；已尝试 4 种常见上限参数，结果仍未超过该值。"
     # Escaped Unicode is decoded back to normal text by JSON.parse in server.mjs.
     print(json.dumps(result, ensure_ascii=True, separators=(",", ":")))
 
