@@ -39,6 +39,10 @@ import "./styles.css";
 const TYPE_LABELS = ["输入", "输出", "缓存读", "缓存写"];
 const DEFAULT_PAGE_SIZE = 24;
 const LONG_OUTPUT_PROMPT = "请连续生成一段不少于 500 个汉字的科幻短篇小说。不要列提纲、不要解释写作过程、不要提前总结；请直接输出完整正文，并尽量持续生成到请求允许的最大长度。";
+const MAX_DETECTION_RUNS = 300;
+const MAX_DETECTION_CONCURRENCY = 100;
+const API_KEY_STORAGE_KEY = "model-dashboard-channel-api-keys";
+const ACTIVE_JOB_STORAGE_KEY = "model-dashboard-active-channel-job";
 
 const safeStorage = {
   get(key, fallback) {
@@ -76,6 +80,36 @@ function formatSourceDate(value) {
   if (!value) return "尚未提供";
   const text = String(value);
   return /^\d{4}-\d{2}-\d{2}$/.test(text) || /^\d{4}-\d{2}$/.test(text) ? text : formatDate(value);
+}
+
+function dataConnectionLog(status, data) {
+  const updatedAt = data?.meta?.updatedAt;
+  const lines = [
+    `状态：${status?.state === "running" ? "正在更新" : status?.state === "error" ? "更新异常，沿用快照" : "已连接"}`,
+    `数据抓取时间：${formatDate(status?.finishedAt || status?.recoveredAt || updatedAt)}`,
+    `数据版本时间：${formatDate(updatedAt)}`,
+    `数据来源文件：${status?.source || "本地 public/data 快照"}`,
+    `主数据文件：/data/dashboard.json`,
+    `索引文件：/data/index.json`,
+    `索引接口：/api/data`,
+    `状态接口：/api/status`,
+    `对比分片：/data/comparison/`,
+    `最低价分片：/data/best/`,
+    `Excel 导出：/downloads/workbook.xlsx`,
+  ];
+  if (status?.message) lines.push(`最近日志：${status.message}`);
+  return lines.join("\n");
+}
+
+function DataConnectionStatus({ status, data }) {
+  const stateLabel = status.state === "running" ? "正在更新" : status.state === "error" ? "更新异常" : "本地数据已连接";
+  return (
+    <div className={`connection-state ${status.state}`} tabIndex="0" aria-label={dataConnectionLog(status, data)}>
+      <span className="status-dot"></span>
+      <div><strong>{stateLabel}</strong><small>{status.state === "error" ? "保留上次快照" : formatDate(data?.meta?.updatedAt)}</small></div>
+      <div className="connection-tooltip" role="tooltip"><strong>本地数据日志</strong><pre>{dataConnectionLog(status, data)}</pre></div>
+    </div>
+  );
 }
 
 function priceTone(value, min, max) {
@@ -168,8 +202,8 @@ function DetailPopover({ detail, position, onDetectChannel }) {
   const usdPrices = Array.isArray(detail.usdPrices) ? detail.usdPrices : [];
   const cnyPrices = Array.isArray(detail.cnyPrices) ? detail.cnyPrices : [];
   const fields = [
-    ["供应商", detail.supplier],
-    ["生产厂商", detail.vendor],
+    ["渠道", detail.supplier],
+    ["生产商", detail.vendor],
     ["模型系列", detail.modelSeries],
     ["原始模型名", detail.originalModelName],
     ["模式", detail.mode],
@@ -237,13 +271,13 @@ function ComparisonTable({ rows, suppliers, currency, loading, sortState, onSort
     }}>
       <div className="table-scroll">
         <table className="comparison-table">
-          <thead><tr><th className="sticky-col model-col"><span className="model-header-label">模型</span>{sortState.model ? <small className="active-model-sort">「{sortState.model}」按{sortState.type}价排序</small> : null}</th><th className="sticky-col vendor-col">厂商</th><th className="sticky-col type-col">价格类型 / 排序</th>{suppliers.map((supplier) => <th key={supplier}>{supplier}</th>)}</tr></thead>
+          <thead><tr><th className="sticky-col model-col"><span className="model-header-label">模型名</span>{sortState.model ? <small className="active-model-sort">「{sortState.model}」按{sortState.type}价排序</small> : null}</th><th className="sticky-col vendor-col">生产商</th><th className="sticky-col type-col">价格类型 / 排序</th>{suppliers.map((supplier) => <th key={supplier}>{supplier}</th>)}</tr></thead>
           <tbody>
             {grouped.map(([model, modelRows]) => modelRows.map((row, index) => (
               <tr key={`${model}-${row.type}`}>
                 {index === 0 ? <td className="sticky-col model-cell detail-trigger" rowSpan={modelRows.length} onClick={(event) => { event.stopPropagation(); showDetail(event, Object.values(row.prices)[0]?.details); }}><span className="model-cell-content"><span>{model}</span></span></td> : null}
                 {index === 0 ? <td className="sticky-col vendor-cell detail-trigger" rowSpan={modelRows.length} onClick={(event) => { event.stopPropagation(); showDetail(event, Object.values(row.prices)[0]?.details); }}>{row.vendor}</td> : null}
-                <td className="sticky-col type-cell"><span>{row.type}</span><button className={`type-sort ${sortState.model === model && sortState.type === row.type ? "is-sorted" : ""}`} onClick={(event) => { event.stopPropagation(); onSortModel(model, row.type); }} title={`按${model}的${row.type}价格排列供应商`} aria-label={`按${model}的${row.type}价格排列供应商`}><small>{sortState.model === model && sortState.type === row.type ? (sortState.direction === "asc" ? "小→大" : "大→小") : "排序"}</small></button></td>
+                <td className="sticky-col type-cell"><span>{row.type}</span><button className={`type-sort ${sortState.model === model && sortState.type === row.type ? "is-sorted" : ""}`} onClick={(event) => { event.stopPropagation(); onSortModel(model, row.type); }} title={`按${model}的${row.type}价格排列渠道`} aria-label={`按${model}的${row.type}价格排列渠道`}><small>{sortState.model === model && sortState.type === row.type ? (sortState.direction === "asc" ? "小→大" : "大→小") : "排序"}</small></button></td>
                 {suppliers.map((supplier) => {
                   const price = row.prices[supplier];
                   const value = price ? price[currency] : null;
@@ -346,7 +380,7 @@ function ChannelEditor({ channel, onSave, onCancel }) {
       <div className="editor-title"><div><p className="eyebrow">Channel record</p><h3>{channel.id === "new" ? "新增渠道" : "编辑渠道"}</h3></div><Button icon={X} title="关闭编辑" onClick={onCancel} /></div>
       <label>数据接入方式<select value={draft.ingestMode || "manual"} onChange={(event) => update("ingestMode", event.target.value)}><option value="relaywatch">RelayWatch 抓取</option><option value="manual">手动添加</option></select></label>
       <label>渠道名称<input value={draft.name || ""} onChange={(event) => update("name", event.target.value)} /></label>
-      <label>生产厂商<input value={draft.vendor || ""} onChange={(event) => update("vendor", event.target.value)} /></label>
+      <label>生产商<input value={draft.vendor || ""} onChange={(event) => update("vendor", event.target.value)} /></label>
       <label>数据来源<input value={draft.source || ""} onChange={(event) => update("source", event.target.value)} /></label>
       <label>{draft.ingestMode === "relaywatch" ? "抓取网址" : "价格网址"}<input value={draft.pricingUrl || ""} onChange={(event) => update("pricingUrl", event.target.value)} placeholder="https://" /></label>
       <label>API base<input value={draft.apiBase || ""} onChange={(event) => update("apiBase", event.target.value)} /></label>
@@ -390,7 +424,7 @@ function PlaywrightImportPanel({ stagedImport, onStage, onClear }) {
     <section className="playwright-panel">
       <div className="playwright-copy"><div className="playwright-icon"><Upload size={17} /></div><div><p className="eyebrow">RelayWatch bridge</p><h2>RelayWatch 数据入口</h2><p>导入 RelayWatch 归一化或 providers JSON 快照，作为后台更新前的本地数据入口。</p></div></div>
       <div className="playwright-actions"><input ref={inputRef} type="file" accept=".json,application/json" onChange={handleFile} hidden /><Button icon={Upload} onClick={() => inputRef.current?.click()}>导入 JSON 快照</Button>{stagedImport ? <Button icon={Trash2} onClick={onClear} title="清除暂存记录">清除暂存</Button> : null}</div>
-      {stagedImport ? <div className="playwright-status"><Check size={14} /><span>{stagedImport.fileName} · {stagedImport.providerCount} 个供应商 · {stagedImport.modelCount.toLocaleString()} 个模型 · {formatDate(stagedImport.importedAt)}</span></div> : null}
+      {stagedImport ? <div className="playwright-status"><Check size={14} /><span>{stagedImport.fileName} · {stagedImport.providerCount} 个渠道 · {stagedImport.modelCount.toLocaleString()} 个模型 · {formatDate(stagedImport.importedAt)}</span></div> : null}
       {message ? <div className="playwright-message">{message}</div> : null}
     </section>
   );
@@ -508,10 +542,10 @@ function SettingsView({ channels, onSaveChannel, playwrightImport, onStagePlaywr
   };
   return (
     <div className="settings-view">
-      <div className="page-heading"><div><p className="eyebrow">Configuration</p><h1>渠道管理</h1><p className="page-subtitle">维护价格来源、供应商标签、连接方式和本地导出信息</p></div><Button className="settings-add-button" variant="primary" icon={Plus} onClick={() => setEditing({ id: "new", name: "", vendor: "", source: "relaywatch爬取", pricingUrl: "", apiBase: "", exchangeRate: 6.74, billingUnit: "USD", pricingMode: "auto", priceScale: 1, category: "transit", ingestMode: "relaywatch", connectionMode: "auto" })}>新增渠道</Button></div>
+      <div className="page-heading"><div><p className="eyebrow">Configuration</p><h1>渠道管理</h1><p className="page-subtitle">维护价格来源、渠道标签、连接方式和本地导出信息</p></div><Button className="settings-add-button" variant="primary" icon={Plus} onClick={() => setEditing({ id: "new", name: "", vendor: "", source: "relaywatch爬取", pricingUrl: "", apiBase: "", exchangeRate: 6.74, billingUnit: "USD", pricingMode: "auto", priceScale: 1, category: "transit", ingestMode: "relaywatch", connectionMode: "auto" })}>新增渠道</Button></div>
       <div className="settings-layout">
         <div className="channel-list-panel">
-          <div className="settings-toolbar"><div className="inline-search"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索渠道、厂商、来源或网址" /></div><div className="settings-filter-controls"><div className="segmented"><button className={category === "all" ? "active" : ""} onClick={() => setCategory("all")}>全部</button><button className={category === "official" ? "active" : ""} onClick={() => setCategory("official")}>官方</button><button className={category === "transit" ? "active" : ""} onClick={() => setCategory("transit")}>中转</button><button className={category === "unknown" ? "active" : ""} onClick={() => setCategory("unknown")}>待确认</button></div><MultiSelect label="数据来源" options={sourceOptions} selected={sources} onChange={setSources} searchPlaceholder="搜索数据来源" /><MultiSelect label="计价单位" options={billingUnitOptions} selected={billingUnits} onChange={setBillingUnits} searchPlaceholder="搜索计价单位" /><select className="native-select settings-sort-select" value={sortDirection} onChange={(event) => setSortDirection(event.target.value)}><option value="asc">名称升序（A-Z）</option><option value="desc">名称降序（Z-A）</option></select></div><span className="settings-result-count">{filtered.length} / {channels.length} 个渠道</span></div>
+          <div className="settings-toolbar"><div className="inline-search"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索渠道、生产商、来源或网址" /></div><div className="settings-filter-controls"><div className="segmented"><button className={category === "all" ? "active" : ""} onClick={() => setCategory("all")}>全部</button><button className={category === "official" ? "active" : ""} onClick={() => setCategory("official")}>官方</button><button className={category === "transit" ? "active" : ""} onClick={() => setCategory("transit")}>中转</button><button className={category === "unknown" ? "active" : ""} onClick={() => setCategory("unknown")}>待确认</button></div><MultiSelect label="数据来源" options={sourceOptions} selected={sources} onChange={setSources} searchPlaceholder="搜索数据来源" /><MultiSelect label="计价单位" options={billingUnitOptions} selected={billingUnits} onChange={setBillingUnits} searchPlaceholder="搜索计价单位" /><select className="native-select settings-sort-select" value={sortDirection} onChange={(event) => setSortDirection(event.target.value)}><option value="asc">名称升序（A-Z）</option><option value="desc">名称降序（Z-A）</option></select></div><span className="settings-result-count">{filtered.length} / {channels.length} 个渠道</span></div>
            <div className="channel-list">{filtered.map((channel) => <div className="channel-row" key={channel.id}><div className="channel-main"><div className="channel-name-line"><strong>{channel.name}</strong><TagBadge category={channel.category} /></div><span>{channel.vendor} · {channel.source}</span><span className="channel-rate">计价：{channel.billingUnit || "USD"} · {formatNumber(channel.exchangeRate ?? 6.74)} CNY / 单位 · 解析：{channel.pricingMode === "billing_expr" ? "动态表达式" : channel.pricingMode === "model_ratio" ? "模型倍率" : "自动"} · 调整：×{formatNumber(channel.priceScale ?? 1)} · 连接：{connectionModeLabel(channel.connectionMode, channel.ingestMode)}</span><a href={channel.pricingUrl || "#"} target="_blank" rel="noreferrer">{channel.pricingUrl || "未配置价格网址"}{channel.pricingUrl ? <ExternalLink size={13} /> : null}</a></div><Button icon={Pencil} title={`编辑 ${channel.name}`} onClick={() => setEditing(channel)} /></div>)}{!filtered.length ? <EmptyState /> : null}</div>
         </div>
         {editing ? <ChannelEditor channel={editing} onCancel={() => setEditing(null)} onSave={save} /> : <div className="settings-note"><Server size={20} /><strong>渠道信息</strong><span>选择 RelayWatch 抓取后，保存前会先测试网址；官方渠道使用浅绿色标识，中转站使用浅黄色标识。</span></div>}
@@ -616,11 +650,11 @@ function Overview({ data, loadedPages, onLoadPage, onRefresh, isRefreshing, onDe
   const toggleSort = (model, type) => setSortState((current) => ({ model, type, direction: current.model === model && current.type === type && current.direction === "asc" ? "desc" : "asc" }));
   return (
     <div className="overview-view">
-      <div className="page-heading"><div><p className="eyebrow">Price comparison</p><h1>模型渠道价格对比</h1><p className="page-subtitle">按模型系列、厂商和供应商筛选，并直接比较同一模型的渠道价格</p></div><div className="heading-actions"><Button icon={Download} title="下载当前 Excel 工作簿" onClick={() => { window.location.href = "/downloads/workbook.xlsx"; }}>导出 Excel</Button><Button variant="primary" icon={RefreshCw} title="立即运行数据更新" onClick={onRefresh} disabled={isRefreshing}>{isRefreshing ? "更新中" : "更新数据"}</Button></div></div>
-      <div className="stats-row"><Stat icon={Database} accent="accent-blue" value={data.meta.modelCount.toLocaleString()} label="模型" detail="models 数据" /><Stat icon={Server} accent="accent-mint" value={data.meta.supplierCount.toLocaleString()} label="供应商" detail="可比较渠道" /><Stat icon={Tag} accent="accent-yellow" value={data.meta.vendorCount.toLocaleString()} label="厂商" detail="生产厂商" /><Stat icon={Clock3} accent="accent-coral" value={formatDate(data.meta.updatedAt)} label="上次更新" detail="每 3 小时自动检查" /></div>
+      <div className="page-heading"><div><p className="eyebrow">Price comparison</p><h1>模型渠道价格对比</h1><p className="page-subtitle">按模型系列、生产商和渠道筛选，并直接比较同一模型的渠道价格</p></div><div className="heading-actions"><Button icon={Download} title="下载当前 Excel 工作簿" onClick={() => { window.location.href = "/downloads/workbook.xlsx"; }}>导出 Excel</Button><Button variant="primary" icon={RefreshCw} title="立即运行数据更新" onClick={onRefresh} disabled={isRefreshing}>{isRefreshing ? "更新中" : "更新数据"}</Button></div></div>
+      <div className="stats-row"><Stat icon={Database} accent="accent-blue" value={data.meta.modelCount.toLocaleString()} label="模型名" detail="models 数据" /><Stat icon={Server} accent="accent-mint" value={data.meta.supplierCount.toLocaleString()} label="渠道" detail="可比较渠道" /><Stat icon={Tag} accent="accent-yellow" value={data.meta.vendorCount.toLocaleString()} label="生产商" detail="模型生产商" /><Stat icon={Clock3} accent="accent-coral" value={formatDate(data.meta.updatedAt)} label="上次更新" detail="每 3 小时自动检查" /></div>
       <section className="comparison-section"><div className="section-heading"><div><p className="eyebrow">Cross-provider matrix</p><h2>横向对比</h2></div><div className="currency-switch"><span>显示币种</span><button className={currency === "usd" ? "active" : ""} onClick={() => setCurrency("usd")}>USD / 1M</button><button className={currency === "cny" ? "active" : ""} onClick={() => setCurrency("cny")}>CNY / 1M</button></div></div>
-        <div className="comparison-help"><span className="help-sort"><ArrowUpDown size={14} />点击“价格类型”右侧的排序按钮，可按当前模型的输入、输出、缓存读或缓存写价格重排供应商；再次点击切换升序/降序。</span><span className="help-color"><i className="legend-swatch low"></i>浅绿色 = 价格较低 <i className="legend-swatch high"></i>浅红色 = 价格较高</span></div>
-        <div className="filter-bar"><div className="filter-label"><Filter size={16} />筛选</div><MultiSelect label="模型" options={filterOptions.models} selected={filters.models} onChange={(value) => updateFilter("models", value)} searchPlaceholder="搜索模型" /><MultiSelect label="供应商" options={filterOptions.suppliers} selected={filters.suppliers} onChange={(value) => updateFilter("suppliers", value)} searchPlaceholder="搜索供应商" /><MultiSelect label="厂商" options={filterOptions.vendors} selected={filters.vendors} onChange={(value) => updateFilter("vendors", value)} searchPlaceholder="搜索厂商" /><MultiSelect label="模型系列" options={filterOptions.modelSeries} selected={filters.modelSeries} onChange={(value) => updateFilter("modelSeries", value)} searchPlaceholder="搜索模型系列" /><span className="filter-result">{filteredModels.length} 个模型 · 当前页 {visibleModelRecords.length} 个 · {visibleSuppliers.length} 个渠道{loading ? " · 正在读取分片" : ""}</span></div>
+        <div className="comparison-help"><span className="help-sort"><ArrowUpDown size={14} />点击“价格类型”右侧的排序按钮，可按当前模型的输入、输出、缓存读或缓存写价格重排渠道；再次点击切换升序/降序。</span><span className="help-color"><i className="legend-swatch low"></i>浅绿色 = 价格较低 <i className="legend-swatch high"></i>浅红色 = 价格较高</span></div>
+          <div className="filter-bar"><div className="filter-label"><Filter size={16} />筛选</div><MultiSelect label="模型名" options={filterOptions.models} selected={filters.models} onChange={(value) => updateFilter("models", value)} searchPlaceholder="搜索模型名" /><MultiSelect label="渠道" options={filterOptions.suppliers} selected={filters.suppliers} onChange={(value) => updateFilter("suppliers", value)} searchPlaceholder="搜索渠道" /><MultiSelect label="生产商" options={filterOptions.vendors} selected={filters.vendors} onChange={(value) => updateFilter("vendors", value)} searchPlaceholder="搜索生产商" /><MultiSelect label="模型系列" options={filterOptions.modelSeries} selected={filters.modelSeries} onChange={(value) => updateFilter("modelSeries", value)} searchPlaceholder="搜索模型系列" /><span className="filter-result">{filteredModels.length} 个模型名 · 当前页 {visibleModelRecords.length} 个 · {visibleSuppliers.length} 个渠道{loading ? " · 正在读取分片" : ""}</span></div>
         <ComparisonTable rows={rows} suppliers={visibleSuppliers} currency={currency} loading={loading} sortState={sortState} onSortModel={toggleSort} onDetectChannel={onDetectChannel} />
         <Pager page={page} pageCount={pageCount} onChange={setPage} label={`${filteredModels.length} 个模型 · 当前页 ${visibleModelRecords.length} 个`} />
       </section>
@@ -636,12 +670,16 @@ function ChannelCheckView({ channels, data, history, onRecord, prefill }) {
   const [modelQuery, setModelQuery] = useState("");
   const [customModel, setCustomModel] = useState("");
   const [apiKey, setApiKey] = useState("");
+  const [storedApiKeys, setStoredApiKeys] = useState(() => safeStorage.get(API_KEY_STORAGE_KEY, {}));
   const [apiBase, setApiBase] = useState("");
   const [connectionMode, setConnectionMode] = useState("auto");
   const [prompt, setPrompt] = useState(LONG_OUTPUT_PROMPT);
   const [maxTokens, setMaxTokens] = useState(512);
   const [runCount, setRunCount] = useState(1);
   const [concurrency, setConcurrency] = useState(1);
+  const [backgroundRun, setBackgroundRun] = useState(true);
+  const [activeJob, setActiveJob] = useState(() => safeStorage.get(ACTIVE_JOB_STORAGE_KEY, null));
+  const [jobProgress, setJobProgress] = useState(null);
   const [checking, setChecking] = useState(false);
   const [result, setResult] = useState(null);
   const [outputPreviewOpen, setOutputPreviewOpen] = useState(false);
@@ -655,7 +693,6 @@ function ChannelCheckView({ channels, data, history, onRecord, prefill }) {
     setModel(prefill.model || "");
     setApiBase(prefill.apiBase || "");
     setConnectionMode(prefill.connectionMode || "auto");
-    setApiKey("");
     setResult(null);
     setOutputPreviewOpen(false);
     setError("");
@@ -666,6 +703,19 @@ function ChannelCheckView({ channels, data, history, onRecord, prefill }) {
     return channels.filter((channel) => [channel.id, channel.name, channel.url, channel.apiBase, channel.pricingUrl, channel.source, categoryLabel(channel.category)].filter(Boolean).join(" ").toLocaleLowerCase().includes(query));
   }, [channels, channelQuery]);
   const selectedChannel = channels.find((channel) => channel.id === channelId);
+  useEffect(() => {
+    if (!selectedChannel?.id) return;
+    setApiKey(storedApiKeys[selectedChannel.id] || "");
+  }, [selectedChannel?.id]);
+  const updateApiKey = (value) => {
+    setApiKey(value);
+    if (!selectedChannel?.id) return;
+    setStoredApiKeys((current) => {
+      const next = { ...current, [selectedChannel.id]: value };
+      safeStorage.set(API_KEY_STORAGE_KEY, next);
+      return next;
+    });
+  };
   useEffect(() => {
     if (!channelOptions.some((channel) => channel.id === channelId)) setChannelId(channelOptions[0]?.id || "");
   }, [channelOptions, channelId]);
@@ -682,10 +732,48 @@ function ChannelCheckView({ channels, data, history, onRecord, prefill }) {
   useEffect(() => {
     if (!modelOptions.some((item) => item.model === model)) setModel(modelOptions[0]?.model || "");
   }, [modelOptions, model]);
+  useEffect(() => {
+    if (!activeJob?.jobId) return undefined;
+    let cancelled = false;
+    let recorded = false;
+    const poll = async () => {
+      try {
+        const response = await fetch(`/api/channel-check/jobs/${encodeURIComponent(activeJob.jobId)}`, { cache: "no-store" });
+        const payload = await response.json();
+        if (cancelled) return;
+        if (!response.ok) throw new Error(payload.message || "后台检测任务不存在或已过期");
+        setJobProgress(payload);
+        setChecking(payload.state === "running");
+        if (payload.state === "running") return;
+        if (recorded) return;
+        recorded = true;
+        if (payload.result) {
+          const record = { ...payload.result, channelId: activeJob.channelId, channelName: activeJob.channelName, model: activeJob.model, checkedAt: new Date().toISOString(), runs: activeJob.runs, concurrency: activeJob.concurrency, background: true };
+          setResult(record);
+          onRecord(record);
+          setError(payload.result.ok ? "" : payload.result.message || "后台检测完成，但存在失败请求");
+        } else {
+          setError(payload.error || payload.message || "后台检测失败");
+        }
+        setChecking(false);
+        setActiveJob(null);
+        safeStorage.set(ACTIVE_JOB_STORAGE_KEY, null);
+      } catch (pollError) {
+        if (cancelled) return;
+        setChecking(false);
+        setError(pollError.message || "读取后台检测状态失败");
+        setActiveJob(null);
+        safeStorage.set(ACTIVE_JOB_STORAGE_KEY, null);
+      }
+    };
+    poll();
+    const timer = window.setInterval(poll, 1200);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [activeJob, onRecord]);
   const runCheck = async () => {
     const requestedModel = customModel.trim() || model;
-    const totalRuns = Math.min(20, Math.max(1, Math.floor(Number(runCount) || 1)));
-    const parallelRuns = Math.min(totalRuns, Math.max(1, Math.floor(Number(concurrency) || 1)));
+    const totalRuns = Math.min(MAX_DETECTION_RUNS, Math.max(1, Math.floor(Number(runCount) || 1)));
+    const parallelRuns = Math.min(MAX_DETECTION_CONCURRENCY, totalRuns, Math.max(1, Math.floor(Number(concurrency) || 1)));
     if (!selectedChannel) {
       setError("当前搜索条件没有匹配的渠道，请清空搜索或重新选择渠道。");
       return;
@@ -695,7 +783,7 @@ function ChannelCheckView({ channels, data, history, onRecord, prefill }) {
       return;
     }
     if (!apiKey.trim()) {
-      setError("请填写当前渠道的 API Key。密钥只用于本次检测，不会保存。");
+      setError("请填写当前渠道的 API Key。密钥会按渠道保存在本机浏览器中，不会写入项目文件。");
       return;
     }
     if (!requestedModel) {
@@ -706,8 +794,9 @@ function ChannelCheckView({ channels, data, history, onRecord, prefill }) {
     setError("");
     setResult(null);
     setOutputPreviewOpen(false);
+    let startedBackground = false;
     try {
-      const endpoint = totalRuns > 1 ? "/api/channel-check/batch" : "/api/channel-check";
+      const endpoint = totalRuns > 1 && backgroundRun ? "/api/channel-check/batch/start" : totalRuns > 1 ? "/api/channel-check/batch" : "/api/channel-check";
       const requestedMaxTokens = Math.min(4096, Math.max(16, Math.floor(Number(maxTokens) || 512)));
       setMaxTokens(requestedMaxTokens);
       const response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ apiBase, apiKey, model: requestedModel, prompt, connectionMode, maxTokens: requestedMaxTokens, runs: totalRuns, concurrency: parallelRuns }) });
@@ -717,19 +806,24 @@ function ChannelCheckView({ channels, data, history, onRecord, prefill }) {
       } catch {
         throw new Error(`本地检测服务返回了无效响应（HTTP ${response.status}），请确认 API 服务正在运行。`);
       }
-      const record = { ...payload, channelId: selectedChannel.id, channelName: selectedChannel.name, model: requestedModel, checkedAt: new Date().toISOString(), runs: totalRuns, concurrency: parallelRuns };
-      setResult(record);
-      onRecord(record);
-      if (!response.ok || !payload.ok) {
-        setError(payload.message || "检测失败");
-      } else {
-        setApiKey("");
-      }
+       if (endpoint.endsWith("/start") && payload.ok && payload.jobId) {
+         const nextJob = { jobId: payload.jobId, channelId: selectedChannel.id, channelName: selectedChannel.name, model: requestedModel, runs: totalRuns, concurrency: parallelRuns };
+         startedBackground = true;
+         setActiveJob(nextJob);
+         setJobProgress(payload);
+         safeStorage.set(ACTIVE_JOB_STORAGE_KEY, nextJob);
+         setError("");
+         return;
+       }
+       const record = { ...payload, channelId: selectedChannel.id, channelName: selectedChannel.name, model: requestedModel, checkedAt: new Date().toISOString(), runs: totalRuns, concurrency: parallelRuns };
+       setResult(record);
+       onRecord(record);
+       if (!response.ok || !payload.ok) setError(payload.message || "检测失败");
     } catch (checkError) {
       const message = checkError.message || "检测失败";
       setError(message === "Failed to fetch" ? "无法连接本地检测服务，请确认 4180 端口的 API 服务正在运行。" : message);
     } finally {
-      setChecking(false);
+      if (!startedBackground) setChecking(false);
     }
   };
   const value = (key, fallback = "—") => result?.metrics?.[key] ?? fallback;
@@ -747,7 +841,7 @@ function ChannelCheckView({ channels, data, history, onRecord, prefill }) {
   const totalGeneratedTokens = result?.summary?.totalGeneratedTokens ?? result?.metrics?.outputTokens;
   return (
     <div className="check-view">
-      <div className="page-heading"><div><p className="eyebrow">Channel diagnostics</p><h1>渠道检测</h1><p className="page-subtitle">使用一次短流式请求测量首 Token、响应速度和协议表现；API Key 只在本次请求中使用，不会写入网站。</p></div><div className="check-heading-status"><ShieldCheck size={18} /><span>密钥不落盘</span></div></div>
+       <div className="page-heading"><div><p className="eyebrow">Channel diagnostics</p><h1>渠道检测</h1><p className="page-subtitle">使用一次短流式请求测量首 Token、响应速度和协议表现；批量检测可在服务端后台运行。</p></div><div className="check-heading-status"><ShieldCheck size={18} /><span>密钥仅保存在本机</span></div></div>
       <div className="check-layout">
         <section className="check-form-panel">
           <div className="panel-title"><div className="panel-icon"><KeyRound size={17} /></div><div><p className="eyebrow">Run a probe</p><h2>发起一次检测</h2></div></div>
@@ -755,16 +849,16 @@ function ChannelCheckView({ channels, data, history, onRecord, prefill }) {
           <label>选择渠道<select value={channelId} onChange={(event) => setChannelId(event.target.value)}>{channelOptions.length ? channelOptions.map((channel) => <option key={channel.id} value={channel.id}>{channel.name} · {categoryLabel(channel.category)}</option>) : <option value="" disabled>没有匹配渠道</option>}</select>{channelQuery.trim() ? <span className="field-hint">已筛选 {channelOptions.length} / {channels.length} 个渠道</span> : null}</label>
           <label>API Base<input value={apiBase} onChange={(event) => setApiBase(event.target.value)} placeholder="https://example.com/v1" /></label>
           <label>检测连接<select value={connectionMode} onChange={(event) => setConnectionMode(event.target.value)}><option value="auto">自动（先直连，失败后代理）</option><option value="direct">直连</option><option value="proxy">代理</option></select></label>
-          <label>API Key<input type="password" autoComplete="off" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="只用于本次检测" /></label>
-          <div className="check-run-settings"><label>连续检测次数<input type="number" min="1" max="20" step="1" value={runCount} onChange={(event) => setRunCount(event.target.value === "" ? "" : Number(event.target.value))} /><span className="field-hint">最多 20 次，默认 1 次</span></label><label>并发请求数<input type="number" min="1" max="8" step="1" value={concurrency} onChange={(event) => setConcurrency(event.target.value === "" ? "" : Number(event.target.value))} /><span className="field-hint">仅批量检测生效，最多 8 路</span></label></div>
+           <label><span className="field-label-row"><span>API Key</span><button className="text-action" type="button" onClick={() => updateApiKey("")} disabled={!apiKey}>清除本机 Key</button></span><input type="password" autoComplete="off" value={apiKey} onChange={(event) => updateApiKey(event.target.value)} placeholder="按渠道保存在本机浏览器" /><span className="field-hint">密钥只发送到你填写的 API Base，不会写入项目文件；清除浏览器数据后需要重新填写。</span></label>
+           <div className="check-run-settings"><label>连续检测次数<input type="number" min="1" max={MAX_DETECTION_RUNS} step="1" value={runCount} onChange={(event) => setRunCount(event.target.value === "" ? "" : Number(event.target.value))} /><span className="field-hint">最多 {MAX_DETECTION_RUNS} 次，默认 1 次</span></label><label>并发请求数<input type="number" min="1" max={MAX_DETECTION_CONCURRENCY} step="1" value={concurrency} onChange={(event) => setConcurrency(event.target.value === "" ? "" : Number(event.target.value))} /><span className="field-hint">批量检测最多 {MAX_DETECTION_CONCURRENCY} 路</span></label><label className="background-run-toggle"><span><input type="checkbox" checked={backgroundRun} onChange={(event) => setBackgroundRun(event.target.checked)} />后台运行批量检测</span><span className="field-hint">服务端继续执行，切换页面后仍可回来查看</span></label></div>
           <label>最大输出 Token<input type="number" min="16" max="4096" step="16" value={maxTokens} onChange={(event) => setMaxTokens(event.target.value === "" ? "" : Number(event.target.value))} /><span className="field-hint">每次请求上限 16–4096，默认 512；实际数量以渠道返回为准</span></label>
           <label>搜索模型<div className="input-with-icon"><Search size={14} /><input value={modelQuery} onChange={(event) => setModelQuery(event.target.value)} placeholder="输入关键词缩小模型列表" /></div></label>
           <label>测试模型<select value={model} onChange={(event) => setModel(event.target.value)}>{modelOptions.map((item) => <option key={item.model} value={item.model}>{item.model} · {item.modelSeries || item.modelType}</option>)}</select></label>
           <label>自定义模型名<input value={customModel} onChange={(event) => setCustomModel(event.target.value)} placeholder="可填写渠道实际支持的模型名，优先于上方选择" /></label>
            <label><span className="field-label-row"><span>测试内容</span><button className="text-action" type="button" onClick={() => setPrompt(LONG_OUTPUT_PROMPT)}>填入长输出基准</button></span><textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={3} /><span className="field-hint">短问题会让模型自然提前结束；测速建议要求连续输出较长文本。实际输出仍以模型和渠道返回为准。</span></label>
-          <div className="check-form-foot"><span><Activity size={14} />{runCount > 1 ? `${Math.min(20, Math.max(1, Number(runCount) || 1))} 次请求，最多 ${Math.min(8, Math.max(1, Number(concurrency) || 1))} 路并发` : "一次请求，流式读取"}</span><Button variant="primary" icon={Gauge} onClick={runCheck} disabled={checking}>{checking ? (runCount > 1 ? "批量检测中…" : "检测中…") : runCount > 1 ? "开始批量检测" : "开始检测"}</Button></div>
+           <div className="check-form-foot"><span><Activity size={14} />{checking && activeJob ? `后台进度 ${jobProgress?.completedRuns || 0}/${activeJob.runs} 次` : runCount > 1 ? `${Math.min(MAX_DETECTION_RUNS, Math.max(1, Number(runCount) || 1))} 次请求，最多 ${Math.min(MAX_DETECTION_CONCURRENCY, Math.max(1, Number(concurrency) || 1))} 路并发` : "一次请求，流式读取"}</span><Button variant="primary" icon={Gauge} onClick={runCheck} disabled={checking}>{checking ? (activeJob ? "后台检测中…" : runCount > 1 ? "批量检测中…" : "检测中…") : runCount > 1 ? (backgroundRun ? "启动后台检测" : "开始批量检测") : "开始检测"}</Button></div>
           {error ? <div className="editor-error">{error}</div> : null}
-          <div className="check-note"><ShieldCheck size={14} /><span>检测完成后只记录指标、渠道、模型和时间。不会保存 API Key，也不会将请求内容上传到第三方。</span></div>
+           <div className="check-note"><ShieldCheck size={14} /><span>检测完成后只记录指标、渠道、模型和时间。API Key 按渠道保存在本机浏览器中，不会写入项目文件或上传到第三方。</span></div>
         </section>
         <section className="check-result-panel">
           <div className="panel-title"><div className="panel-icon panel-icon-mint"><BarChart3 size={17} /></div><div><p className="eyebrow">Measurement</p><h2>{result ? `${result.channelName} · ${result.model}` : "检测结果"}</h2></div>{result ? <span className={`check-result-badge ${result.metrics?.ok ? "ok" : result.summary?.successCount ? "partial" : "bad"}`}>{resultBadge}</span> : null}</div>
@@ -919,12 +1013,18 @@ function App() {
   };
   const stagePlaywrightImport = (next) => { setPlaywrightImport(next); safeStorage.set("model-dashboard-playwright-import", next); };
   const clearPlaywrightImport = () => { setPlaywrightImport(null); safeStorage.set("model-dashboard-playwright-import", null); };
-  const recordDetection = (record) => { setDetectionHistory((current) => { const next = [record, ...current].slice(0, 20); safeStorage.set("model-dashboard-channel-checks", next); return next; }); };
+  const recordDetection = useCallback((record) => {
+    setDetectionHistory((current) => {
+      const next = [record, ...current].slice(0, 20);
+      safeStorage.set("model-dashboard-channel-checks", next);
+      return next;
+    });
+  }, []);
 
   if (!data) return <div className="loading-screen"><div className="loading-mark"><Database size={21} /></div><strong>Model Ledger</strong><span>{status.message}</span></div>;
   return (
     <div className="app-shell">
-      <aside className="sidebar"><div className="brand-mark"><div className="brand-symbol"><span></span><span></span><span></span></div><div><strong>Model Ledger</strong><small>API price intelligence</small></div></div><nav className="primary-nav"><button className={view === "overview" ? "active" : ""} onClick={() => setView("overview")}><LayoutDashboard size={18} />模型渠道价格对比</button><button className={view === "check" ? "active" : ""} onClick={() => { setCheckPrefill(null); setView("check"); }}><Gauge size={18} />渠道检测</button><button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}><Settings2 size={18} />渠道管理</button></nav><div className="sidebar-bottom"><div className={`connection-state ${status.state}`}><span className="status-dot"></span><div><strong>{status.state === "running" ? "正在更新" : status.state === "error" ? "更新异常" : "本地数据已连接"}</strong><small>{status.state === "error" ? "保留上次快照" : formatDate(data.meta.updatedAt)}</small></div></div><div className="sidebar-note"><SlidersHorizontal size={15} /><span>代理只用于后台抓取，页面保持本地直连</span></div></div></aside>
+      <aside className="sidebar"><div className="brand-mark"><div className="brand-symbol"><span></span><span></span><span></span></div><div><strong>Model Ledger</strong><small>API price intelligence</small></div></div><nav className="primary-nav"><button className={view === "overview" ? "active" : ""} onClick={() => setView("overview")}><LayoutDashboard size={18} />模型渠道价格对比</button><button className={view === "check" ? "active" : ""} onClick={() => { setCheckPrefill(null); setView("check"); }}><Gauge size={18} />渠道检测</button><button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}><Settings2 size={18} />渠道管理</button></nav><div className="sidebar-bottom"><DataConnectionStatus status={status} data={data} /><div className="sidebar-note"><SlidersHorizontal size={15} /><span>代理只用于后台抓取，页面保持本地直连</span></div></div></aside>
       <main className="main-content"><header className="mobile-header"><div className="brand-symbol"><span></span><span></span><span></span></div><strong>Model Ledger</strong><div className="mobile-nav"><button className={view === "overview" ? "active" : ""} onClick={() => setView("overview")} title="模型渠道价格对比"><LayoutDashboard size={17} /></button><button className={view === "check" ? "active" : ""} onClick={() => { setCheckPrefill(null); setView("check"); }} title="渠道检测"><Gauge size={17} /></button><button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")} title="渠道管理"><Settings2 size={17} /></button></div></header><div className="content-wrap">{view === "overview" ? <Overview data={data} loadedPages={loadedPages} onLoadPage={loadPage} onRefresh={refresh} isRefreshing={isRefreshing} onDetectChannel={openChannelCheck} /> : view === "check" ? <ChannelCheckView channels={channels} data={data} history={detectionHistory} onRecord={recordDetection} prefill={checkPrefill} /> : <SettingsView channels={channels} onSaveChannel={saveChannel} playwrightImport={playwrightImport} onStagePlaywrightImport={stagePlaywrightImport} onClearPlaywrightImport={clearPlaywrightImport} />}</div></main>
     </div>
   );

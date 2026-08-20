@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 
 const appRoot = path.dirname(fileURLToPath(import.meta.url));
 // The release folder is self-contained: scripts, configs and relaywatch all
@@ -20,6 +21,9 @@ const relayPython = process.env.RELAYWATCH_PYTHON || python;
 const proxy = process.env.BANANA_HTTP_PROXY || "http://127.0.0.1:10090";
 const port = Number(process.env.MODEL_DASHBOARD_API_PORT || 4180);
 const connectionModes = new Set(["auto", "direct", "proxy"]);
+const MAX_CHANNEL_CHECK_RUNS = 300;
+const MAX_CHANNEL_CHECK_CONCURRENCY = 100;
+const channelJobs = new Map();
 
 let updateRunning = false;
 
@@ -349,16 +353,17 @@ function standardDeviation(values) {
   return Math.round(Math.sqrt(values.reduce((total, value) => total + ((value - meanValue) ** 2), 0) / values.length) * 100) / 100;
 }
 
-async function runChannelCheckBatch(input) {
+async function runChannelCheckBatch(input, onProgress) {
   const requestedRuns = Number(input?.runs);
   const requestedConcurrency = Number(input?.concurrency);
-  const totalRuns = Math.min(20, Math.max(1, Number.isFinite(requestedRuns) ? Math.floor(requestedRuns) : 1));
-  const concurrency = Math.min(totalRuns, Math.max(1, Number.isFinite(requestedConcurrency) ? Math.floor(requestedConcurrency) : 1));
+  const totalRuns = Math.min(MAX_CHANNEL_CHECK_RUNS, Math.max(1, Number.isFinite(requestedRuns) ? Math.floor(requestedRuns) : 1));
+  const concurrency = Math.min(MAX_CHANNEL_CHECK_CONCURRENCY, totalRuns, Math.max(1, Number.isFinite(requestedConcurrency) ? Math.floor(requestedConcurrency) : 1));
   const results = [];
   for (let offset = 0; offset < totalRuns; offset += concurrency) {
     const size = Math.min(concurrency, totalRuns - offset);
     const chunk = await Promise.all(Array.from({ length: size }, (_, index) => runChannelCheck({ ...input, runs: 1, concurrency: 1, batchIndex: offset + index + 1 })));
     results.push(...chunk.map((item, index) => ({ ...item, runIndex: offset + index + 1 })));
+    onProgress?.({ completedRuns: results.length, successCount: results.filter((item) => item?.ok).length, totalRuns, concurrency });
   }
   const successful = results.filter((item) => item?.ok && item.metrics);
   const metricValues = (key) => successful
@@ -441,6 +446,55 @@ async function runChannelCheckBatch(input) {
   };
 }
 
+function channelJobProgress(job) {
+  return {
+    jobId: job.id,
+    state: job.state,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt || null,
+    completedRuns: job.completedRuns || 0,
+    successCount: job.successCount || 0,
+    totalRuns: job.totalRuns,
+    concurrency: job.concurrency,
+    message: job.message || (job.state === "running" ? "后台检测进行中" : "后台检测已完成"),
+  };
+}
+
+async function startChannelCheckBatch(input) {
+  const apiKey = String(input?.apiKey || "").trim();
+  const model = String(input?.model || "").trim();
+  const apiBase = String(input?.apiBase || "").trim();
+  if (!apiKey) return { ok: false, message: "请填写 API Key" };
+  if (!model) return { ok: false, message: "请选择测试模型" };
+  if (!apiBase) return { ok: false, message: "请填写 API Base" };
+  if ([...channelJobs.values()].filter((job) => job.state === "running").length >= 8) {
+    return { ok: false, message: "后台检测任务已达到 8 个，请等待已有任务完成后再启动。" };
+  }
+  const requestedRuns = Number(input?.runs);
+  const requestedConcurrency = Number(input?.concurrency);
+  const totalRuns = Math.min(MAX_CHANNEL_CHECK_RUNS, Math.max(1, Number.isFinite(requestedRuns) ? Math.floor(requestedRuns) : 1));
+  const concurrency = Math.min(MAX_CHANNEL_CHECK_CONCURRENCY, totalRuns, Math.max(1, Number.isFinite(requestedConcurrency) ? Math.floor(requestedConcurrency) : 1));
+  const id = randomUUID();
+  const job = { id, state: "running", startedAt: new Date().toISOString(), totalRuns, concurrency, completedRuns: 0, successCount: 0, result: null, message: "后台检测进行中" };
+  channelJobs.set(id, job);
+  runChannelCheckBatch({ ...input, runs: totalRuns, concurrency }, (progress) => {
+    Object.assign(job, progress);
+  }).then((result) => {
+    job.state = result.ok ? "success" : "completed";
+    job.finishedAt = new Date().toISOString();
+    job.result = result;
+    job.completedRuns = totalRuns;
+    job.successCount = result.summary?.successCount || 0;
+    job.message = result.message;
+  }).catch((error) => {
+    job.state = "error";
+    job.finishedAt = new Date().toISOString();
+    job.message = String(error.message || error).split("\n")[0];
+  });
+  setTimeout(() => channelJobs.delete(id), 2 * 60 * 60 * 1000).unref?.();
+  return { ok: true, ...channelJobProgress(job) };
+}
+
 function json(res, status, body) {
   const text = JSON.stringify(body);
   res.writeHead(status, { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", "Access-Control-Allow-Origin": "*" });
@@ -495,6 +549,16 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === "/api/channel-check/batch" && req.method === "POST") {
     try { return json(res, 200, await runChannelCheckBatch(await readJsonBody(req))); }
     catch (error) { return json(res, 400, { ok: false, message: error.message || "批量检测请求失败" }); }
+  }
+  if (url.pathname === "/api/channel-check/batch/start" && req.method === "POST") {
+    try { return json(res, 200, await startChannelCheckBatch(await readJsonBody(req))); }
+    catch (error) { return json(res, 400, { ok: false, message: error.message || "后台检测启动失败" }); }
+  }
+  if (url.pathname.startsWith("/api/channel-check/jobs/") && req.method === "GET") {
+    const jobId = decodeURIComponent(url.pathname.slice("/api/channel-check/jobs/".length));
+    const job = channelJobs.get(jobId);
+    if (!job) return json(res, 404, { ok: false, message: "后台检测任务不存在或已过期" });
+    return json(res, 200, { ok: job.state !== "error", ...channelJobProgress(job), result: job.result, error: job.state === "error" ? job.message : null });
   }
   if (url.pathname === "/downloads/workbook.xlsx" && req.method === "GET") return serve(res, downloadFile, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
   if (url.pathname.startsWith("/data/") && req.method === "GET") {

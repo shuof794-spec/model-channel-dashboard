@@ -42,7 +42,12 @@ a { color: inherit; }
 .primary-nav button:hover, .primary-nav button.active { color: #ffffff; background: var(--navy-2); }
 .primary-nav button.active { box-shadow: inset 3px 0 0 #a8d8c6; }
 .sidebar-bottom { margin-top: auto; display: grid; gap: 14px; }
-.connection-state { border-top: 1px solid rgba(255,255,255,.11); padding: 16px 8px 0; display: flex; gap: 9px; align-items: flex-start; }
+.connection-state { position: relative; border-top: 1px solid rgba(255,255,255,.11); padding: 16px 8px 0; display: flex; gap: 9px; align-items: flex-start; cursor: help; outline: 0; }
+.connection-state:focus-visible { box-shadow: 0 0 0 2px rgba(168,216,198,.65); }
+.connection-tooltip { position: absolute; left: 0; bottom: calc(100% + 10px); z-index: 80; width: 310px; padding: 11px 12px; border: 1px solid rgba(168,216,198,.38); background: #162a40; color: #dce8f0; box-shadow: 0 12px 30px rgba(3,13,24,.35); opacity: 0; visibility: hidden; transform: translateY(5px); transition: opacity .16s ease, transform .16s ease, visibility .16s ease; pointer-events: none; }
+.connection-state:hover .connection-tooltip, .connection-state:focus .connection-tooltip { opacity: 1; visibility: visible; transform: translateY(0); }
+.connection-tooltip strong { display: block; margin-bottom: 7px; color: #a8d8c6; font-size: 11px; }
+.connection-tooltip pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; color: #b9c8d5; font: 10px/1.65 Consolas, "Courier New", monospace; }
 .status-dot { width: 8px; height: 8px; margin-top: 5px; display: block; border-radius: 50%; background: #83cba8; box-shadow: 0 0 0 4px rgba(131,203,168,.13); }
 .connection-state.error .status-dot { background: #e77567; box-shadow: 0 0 0 4px rgba(231,117,103,.13); }
 .connection-state.running .status-dot { background: #f0c77a; box-shadow: 0 0 0 4px rgba(240,199,122,.13); }
@@ -278,6 +283,9 @@ a { color: inherit; }
 .check-run-settings { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
 .check-run-settings label { min-width: 0; }
 .check-run-settings .field-hint { display: block; margin-top: -1px; }
+.background-run-toggle { grid-column: 1 / -1; padding: 8px 9px; border: 1px solid #dfe9e4; background: #f7fbf8; }
+.background-run-toggle > span:first-child { display: inline-flex; align-items: center; gap: 7px; color: #527766; }
+.background-run-toggle input { width: 14px; height: 14px; accent-color: #5d9a78; }
 .focus-metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px; }
 .focus-metric { min-height: 106px; padding: 13px 12px 11px; border: 1px solid #dfe9e4; background: #f7fbf8; display: flex; flex-direction: column; justify-content: space-between; gap: 7px; }
 .focus-metric-primary { border-color: #b8d8c5; background: #eaf7ef; box-shadow: inset 3px 0 0 #65a782; }
