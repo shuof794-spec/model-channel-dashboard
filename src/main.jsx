@@ -414,6 +414,59 @@ function SuccessDialog({ dialog, onClose }) {
   );
 }
 
+function OutputSpeedChart({ curve }) {
+  const values = curve.map((value) => Number(value) || 0);
+  if (!values.length) return null;
+  const width = 720;
+  const height = 190;
+  const padding = { top: 18, right: 18, bottom: 28, left: 38 };
+  const chartWidth = width - padding.left - padding.right;
+  const chartHeight = height - padding.top - padding.bottom;
+  const maxValue = Math.max(1, ...values);
+  const points = values.map((value, index) => {
+    const x = padding.left + (values.length === 1 ? chartWidth / 2 : (index / (values.length - 1)) * chartWidth);
+    const y = padding.top + chartHeight - (value / maxValue) * chartHeight;
+    return { x, y, value };
+  });
+  const linePoints = points.map(({ x, y }) => `${x},${y}`).join(" ");
+  const areaPoints = `${padding.left},${padding.top + chartHeight} ${linePoints} ${padding.left + chartWidth},${padding.top + chartHeight}`;
+  return (
+    <section className="speed-panel" aria-label="输出速度曲线">
+      <div className="speed-panel-heading"><div><strong>输出速度曲线</strong><span>按秒统计生成 Token；批量检测显示各次平均值</span></div><b>{formatNumber(Math.max(...values))} token/s 峰值</b></div>
+      <div className="speed-chart-wrap">
+        <svg className="speed-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="每秒输出 Token 速度曲线">
+          {[0, 0.5, 1].map((ratio) => {
+            const y = padding.top + chartHeight * ratio;
+            return <line key={ratio} x1={padding.left} x2={padding.left + chartWidth} y1={y} y2={y} className="speed-grid-line" />;
+          })}
+          <polygon points={areaPoints} className="speed-area" />
+          <polyline points={linePoints} className="speed-line" />
+          {points.map(({ x, y, value }, index) => <circle key={`${index}-${value}`} cx={x} cy={y} r="3" className="speed-point"><title>{`${index + 1} 秒：${formatNumber(value)} token/s`}</title></circle>)}
+          <text x={padding.left - 8} y={padding.top + 4} textAnchor="end" className="speed-axis-label">{formatNumber(maxValue)}</text>
+          <text x={padding.left - 8} y={padding.top + chartHeight + 4} textAnchor="end" className="speed-axis-label">0</text>
+        </svg>
+      </div>
+      <div className="speed-axis"><span>第 1 秒</span><span>{values.length} 秒</span></div>
+    </section>
+  );
+}
+
+function OutputPreviewDialog({ text, model, outputTokens, onClose }) {
+  useEffect(() => {
+    const handleKeyDown = (event) => { if (event.key === "Escape") onClose(); };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+  return (
+    <div className="output-preview-backdrop" role="presentation" onClick={onClose}>
+      <div className="output-preview-modal" role="dialog" aria-modal="true" aria-labelledby="output-preview-title" onClick={(event) => event.stopPropagation()}>
+        <div className="output-preview-heading"><div><p className="eyebrow">Response preview</p><h2 id="output-preview-title">输出预览</h2><span>{model} · {outputTokens ?? "—"} Token</span></div><Button icon={X} title="关闭输出预览" onClick={onClose} /> </div>
+        <pre className="output-preview-text">{text || "渠道没有返回可展示的文本内容。"}</pre>
+      </div>
+    </div>
+  );
+}
+
 function SettingsView({ channels, onSaveChannel, playwrightImport, onStagePlaywrightImport, onClearPlaywrightImport }) {
   const [query, setQuery] = useState("");
   const [category, setCategory] = useState("all");
@@ -585,10 +638,12 @@ function ChannelCheckView({ channels, data, history, onRecord, prefill }) {
   const [apiBase, setApiBase] = useState("");
   const [connectionMode, setConnectionMode] = useState("auto");
   const [prompt, setPrompt] = useState("请用一句话回答：1+1等于几？");
+  const [maxTokens, setMaxTokens] = useState(512);
   const [runCount, setRunCount] = useState(1);
   const [concurrency, setConcurrency] = useState(1);
   const [checking, setChecking] = useState(false);
   const [result, setResult] = useState(null);
+  const [outputPreviewOpen, setOutputPreviewOpen] = useState(false);
   const [error, setError] = useState("");
   useEffect(() => {
     if (!prefill) return;
@@ -601,6 +656,7 @@ function ChannelCheckView({ channels, data, history, onRecord, prefill }) {
     setConnectionMode(prefill.connectionMode || "auto");
     setApiKey("");
     setResult(null);
+    setOutputPreviewOpen(false);
     setError("");
   }, [prefill]);
   const channelOptions = useMemo(() => {
@@ -648,9 +704,12 @@ function ChannelCheckView({ channels, data, history, onRecord, prefill }) {
     setChecking(true);
     setError("");
     setResult(null);
+    setOutputPreviewOpen(false);
     try {
       const endpoint = totalRuns > 1 ? "/api/channel-check/batch" : "/api/channel-check";
-      const response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ apiBase, apiKey, model: requestedModel, prompt, connectionMode, runs: totalRuns, concurrency: parallelRuns }) });
+      const requestedMaxTokens = Math.min(4096, Math.max(16, Math.floor(Number(maxTokens) || 512)));
+      setMaxTokens(requestedMaxTokens);
+      const response = await fetch(endpoint, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ apiBase, apiKey, model: requestedModel, prompt, connectionMode, maxTokens: requestedMaxTokens, runs: totalRuns, concurrency: parallelRuns }) });
       let payload;
       try {
         payload = await response.json();
@@ -683,6 +742,8 @@ function ChannelCheckView({ channels, data, history, onRecord, prefill }) {
   const runResults = Array.isArray(result?.results) && result.results.length ? result.results : result ? [result] : [];
   const tpsCurve = result?.summary?.avgTpsCurve?.length ? result.summary.avgTpsCurve : (result?.metrics?.tpsCurve || []);
   const maxTps = Math.max(1, ...tpsCurve.map((item) => Number(item) || 0));
+  const focusValue = (summaryKey, metricKey, fallback = "—") => result?.summary?.[summaryKey] ?? result?.metrics?.[metricKey] ?? fallback;
+  const totalGeneratedTokens = result?.summary?.totalGeneratedTokens ?? result?.metrics?.outputTokens;
   return (
     <div className="check-view">
       <div className="page-heading"><div><p className="eyebrow">Channel diagnostics</p><h1>渠道检测</h1><p className="page-subtitle">使用一次短流式请求测量首 Token、响应速度和协议表现；API Key 只在本次请求中使用，不会写入网站。</p></div><div className="check-heading-status"><ShieldCheck size={18} /><span>密钥不落盘</span></div></div>
@@ -695,6 +756,7 @@ function ChannelCheckView({ channels, data, history, onRecord, prefill }) {
           <label>检测连接<select value={connectionMode} onChange={(event) => setConnectionMode(event.target.value)}><option value="auto">自动（先直连，失败后代理）</option><option value="direct">直连</option><option value="proxy">代理</option></select></label>
           <label>API Key<input type="password" autoComplete="off" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder="只用于本次检测" /></label>
           <div className="check-run-settings"><label>连续检测次数<input type="number" min="1" max="20" step="1" value={runCount} onChange={(event) => setRunCount(event.target.value === "" ? "" : Number(event.target.value))} /><span className="field-hint">最多 20 次，默认 1 次</span></label><label>并发请求数<input type="number" min="1" max="8" step="1" value={concurrency} onChange={(event) => setConcurrency(event.target.value === "" ? "" : Number(event.target.value))} /><span className="field-hint">仅批量检测生效，最多 8 路</span></label></div>
+          <label>最大输出 Token<input type="number" min="16" max="4096" step="16" value={maxTokens} onChange={(event) => setMaxTokens(event.target.value === "" ? "" : Number(event.target.value))} /><span className="field-hint">每次请求上限 16–4096，默认 512；实际数量以渠道返回为准</span></label>
           <label>搜索模型<div className="input-with-icon"><Search size={14} /><input value={modelQuery} onChange={(event) => setModelQuery(event.target.value)} placeholder="输入关键词缩小模型列表" /></div></label>
           <label>测试模型<select value={model} onChange={(event) => setModel(event.target.value)}>{modelOptions.map((item) => <option key={item.model} value={item.model}>{item.model} · {item.modelSeries || item.modelType}</option>)}</select></label>
           <label>自定义模型名<input value={customModel} onChange={(event) => setCustomModel(event.target.value)} placeholder="可填写渠道实际支持的模型名，优先于上方选择" /></label>
@@ -705,14 +767,16 @@ function ChannelCheckView({ channels, data, history, onRecord, prefill }) {
         </section>
         <section className="check-result-panel">
           <div className="panel-title"><div className="panel-icon panel-icon-mint"><BarChart3 size={17} /></div><div><p className="eyebrow">Measurement</p><h2>{result ? `${result.channelName} · ${result.model}` : "检测结果"}</h2></div>{result ? <span className={`check-result-badge ${result.metrics?.ok ? "ok" : result.summary?.successCount ? "partial" : "bad"}`}>{resultBadge}</span> : null}</div>
-          {result?.summary ? <div className="batch-summary"><div><span>成功次数</span><strong>{result.summary.successCount} / {result.summary.totalRuns}</strong></div><div><span>平均 TTFT</span><strong>{result.summary.avgTtftMs ?? "—"}<small>ms</small></strong></div><div><span>P50 TTFT</span><strong>{result.summary.p50TtftMs ?? "—"}<small>ms</small></strong></div><div><span>P95 TTFT</span><strong>{result.summary.p95TtftMs ?? "—"}<small>ms</small></strong></div><div><span>P99 TTFT</span><strong>{result.summary.p99TtftMs ?? "—"}<small>ms</small></strong></div><div><span>TTFT 标准差</span><strong>{result.summary.stdDevTtftMs ?? "—"}<small>ms</small></strong></div><div><span>平均输出速度</span><strong>{result.summary.avgThroughput ?? "—"}<small>token/s</small></strong></div><div><span>峰值输出速度</span><strong>{result.summary.avgPeakThroughput ?? "—"}<small>token/s</small></strong></div><div><span>总耗时范围</span><strong>{result.summary.minTotalMs ?? "—"}–{result.summary.maxTotalMs ?? "—"}<small>ms</small></strong></div></div> : null}
+          {result ? <div className="focus-metrics"><div className="focus-metric focus-metric-primary"><span>TTFT</span><strong>{focusValue("avgTtftMs", "ttftMs")}<small>ms</small></strong><em>首 Token 延迟</em></div><div className="focus-metric"><span>平均 Token 速度</span><strong>{focusValue("avgThroughput", "throughput")}<small>token/s</small></strong><em>首 Token 后的生成速度</em></div><div className="focus-metric"><span>平均 ITL</span><strong>{focusValue("avgItlMs", "itlMs")}<small>ms</small></strong><em>相邻 Token 平均间隔</em></div><div className="focus-metric"><span>平均 RTM</span><strong>{focusValue("avgRtmMs", "totalMs")}<small>ms</small></strong><em>请求到完整响应</em></div><div className="focus-metric"><span>总生成 Token</span><strong>{totalGeneratedTokens ?? "—"}<small>Token</small></strong><em>{result.summary ? `${result.summary.successCount} 次成功请求合计` : "本次响应"}</em></div></div> : null}
+          {result?.summary ? <div className="batch-summary"><div><span>成功次数</span><strong>{result.summary.successCount} / {result.summary.totalRuns}</strong></div><div><span>P50 TTFT</span><strong>{result.summary.p50TtftMs ?? "—"}<small>ms</small></strong></div><div><span>P95 TTFT</span><strong>{result.summary.p95TtftMs ?? "—"}<small>ms</small></strong></div><div><span>P99 TTFT</span><strong>{result.summary.p99TtftMs ?? "—"}<small>ms</small></strong></div><div><span>TTFT 标准差</span><strong>{result.summary.stdDevTtftMs ?? "—"}<small>ms</small></strong></div><div><span>峰值输出速度</span><strong>{result.summary.avgPeakThroughput ?? "—"}<small>token/s</small></strong></div><div><span>总耗时范围</span><strong>{result.summary.minTotalMs ?? "—"}–{result.summary.maxTotalMs ?? "—"}<small>ms</small></strong></div></div> : null}
           {result ? <div className="metric-grid">{metricItems.map(([key, label, unit]) => <div className="metric-card" key={key}><span>{label}</span><strong>{value(key)}{value(key) !== "—" && unit ? <small>{unit}</small> : null}</strong></div>)}</div> : <div className="check-empty"><Gauge size={28} /><strong>等待检测</strong><span>选择渠道、填写 Key 后开始，结果会显示在这里。</span></div>}
-          {result && tpsCurve.length ? <div className="tps-panel"><div className="tps-panel-heading"><strong>TPS 曲线</strong><span>按每秒统计输出 Token；批量检测显示各次平均值</span></div><div className="tps-chart" aria-label="TPS 曲线">{tpsCurve.map((item, index) => <div key={`${index}-${item}`} className="tps-bar" style={{ height: `${Math.max(5, (Number(item) / maxTps) * 100)}%` }} title={`${index + 1} 秒：${Number(item).toFixed(1)} token/s`} />)}</div><div className="tps-axis"><span>1 秒</span><span>{tpsCurve.length} 秒</span></div></div> : null}
-          {result?.message ? <div className="check-response-note"><strong>{result.message}</strong>{result.metrics?.endpoint ? <span>请求地址：{result.metrics.endpoint} · 连接：{result.metrics.connectionModeUsed || "自动"} · HTTP {result.metrics.statusCode ?? "—"} · 服务端模型：{result.metrics.responseModel || "未返回"}</span> : null}{result.metrics?.outputPreview ? <span>输出预览：{result.metrics.outputPreview}</span> : null}{result.metrics?.usage ? <span>Usage：输入 {result.metrics.usage.prompt_tokens ?? "—"} · 输出 {result.metrics.usage.completion_tokens ?? "—"} · 总计 {result.metrics.usage.total_tokens ?? "—"}</span> : null}{result.metrics?.tokenCountSource ? <span>Token 统计来源：{result.metrics.tokenCountSource === "usage" ? "渠道返回 usage" : "根据输出文本估算"}</span> : null}</div> : null}
+          {result && tpsCurve.length ? <OutputSpeedChart curve={tpsCurve} /> : null}
+          {result?.message ? <div className="check-response-note"><strong>{result.message}</strong>{result.metrics?.endpoint ? <span>请求地址：{result.metrics.endpoint} · 连接：{result.metrics.connectionModeUsed || "自动"} · HTTP {result.metrics.statusCode ?? "—"} · 服务端模型：{result.metrics.responseModel || "未返回"}</span> : null}{result.metrics?.outputPreview ? <button className="output-preview-trigger" type="button" onClick={() => setOutputPreviewOpen(true)}><span>打开输出预览</span><span>{result.metrics.outputPreview.length} 字符 · 独立窗口查看</span><ExternalLink size={14} /></button> : null}{result.metrics?.usage ? <span>Usage：输入 {result.metrics.usage.prompt_tokens ?? "—"} · 输出 {result.metrics.usage.completion_tokens ?? "—"} · 总计 {result.metrics.usage.total_tokens ?? "—"}</span> : null}{result.metrics?.tokenCountSource ? <span>Token 统计来源：{result.metrics.tokenCountSource === "usage" ? "渠道返回 usage" : result.metrics.tokenCountSource === "文本估算" ? "根据输出文本估算" : "未收到可计数输出"}</span> : null}</div> : null}
           {result && runResults.length > 1 ? <div className="run-details"><div className="tps-panel-heading"><strong>逐次运行</strong><span>用于定位偶发超时、限流或速度波动</span></div><div className="run-details-wrap"><table className="run-details-table"><thead><tr><th>次数</th><th>状态</th><th>TTFT</th><th>总响应</th><th>输出 Token</th><th>吞吐</th><th>峰值</th><th>错误</th></tr></thead><tbody>{runResults.map((run, index) => <tr key={`${run.runIndex || index + 1}-${run.metrics?.totalMs || ""}`}><td>{run.runIndex || index + 1}</td><td><span className={`history-status ${run.ok ? "ok" : "bad"}`}>{run.ok ? "成功" : "失败"}</span></td><td>{run.metrics?.ttftMs ?? "—"} ms</td><td>{run.metrics?.totalMs ?? "—"} ms</td><td>{run.metrics?.outputTokens ?? "—"}</td><td>{run.metrics?.throughput ?? "—"} token/s</td><td>{run.metrics?.peakThroughput ?? "—"} token/s</td><td>{run.ok ? "—" : run.message || "未知错误"}</td></tr>)}</tbody></table></div></div> : null}
         </section>
       </div>
       <section className="check-history"><div className="section-heading"><div><p className="eyebrow">History</p><h2>检测记录</h2><p className="section-subtitle">仅保留最近 20 条本地记录，便于比较不同渠道。</p></div><History size={19} color="#7890a4" /></div>{history.length ? <div className="history-table-wrap"><table className="history-table"><thead><tr><th>时间</th><th>渠道</th><th>模型</th><th>TTFT</th><th>总响应</th><th>吞吐</th><th>结果</th></tr></thead><tbody>{history.map((item) => <tr key={`${item.checkedAt}-${item.channelName}-${item.model}`}><td>{formatDate(item.checkedAt)}</td><td>{item.channelName}</td><td>{item.model}</td><td>{item.metrics?.ttftMs ?? "—"} ms</td><td>{item.metrics?.totalMs ?? "—"} ms</td><td>{item.metrics?.throughput ?? "—"} token/s</td><td><span className={`history-status ${item.metrics?.ok ? "ok" : "bad"}`}>{item.metrics?.ok ? "成功" : "失败"}</span></td></tr>)}</tbody></table></div> : <EmptyState title="暂无检测记录" description="完成一次渠道检测后会自动记录" />}</section>
+      {outputPreviewOpen ? <OutputPreviewDialog text={result?.metrics?.outputPreview} model={result?.model} outputTokens={result?.metrics?.outputTokens} onClose={() => setOutputPreviewOpen(false)} /> : null}
     </div>
   );
 }

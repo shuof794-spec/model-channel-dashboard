@@ -140,12 +140,22 @@ def parse_choice(payload: dict[str, Any]) -> tuple[str, str | None]:
     choice = choices[0]
     delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
     message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
-    value = delta.get("content")
-    if value is None:
-        value = choice.get("text")
-    if value is None:
-        value = message.get("content")
-    return content_text(value), payload.get("model")
+    # Reasoning models may stream their first tokens in reasoning_content (or
+    # reasoning/thinking) before content appears. Treat every textual delta as
+    # output for timing purposes so TTFT is not left blank for those models.
+    for value in (
+        delta.get("content"),
+        delta.get("reasoning_content"),
+        delta.get("reasoning"),
+        delta.get("thinking"),
+        choice.get("text"),
+        message.get("content"),
+        message.get("reasoning_content"),
+    ):
+        text = content_text(value)
+        if text:
+            return text, payload.get("model")
+    return "", payload.get("model")
 
 
 async def perform_once(request: dict[str, Any], mode: str) -> dict[str, Any]:
@@ -251,12 +261,20 @@ async def perform_once(request: dict[str, Any], mode: str) -> dict[str, Any]:
 
         ended = time.perf_counter()
         output_text = "".join(output)
-        token_count = number((usage or {}).get("completion_tokens")) or max(1, round(len(output_text) / 4))
-        token_count_source = "usage" if number((usage or {}).get("completion_tokens")) is not None else "文本估算"
+        usage_tokens = number((usage or {}).get("completion_tokens"))
+        if usage_tokens is not None:
+            token_count = max(0, int(usage_tokens))
+            token_count_source = "usage"
+        elif output_text:
+            token_count = max(1, round(len(output_text) / 4))
+            token_count_source = "文本估算"
+        else:
+            token_count = None
+            token_count_source = "未返回"
         metrics["ttftMs"] = round((first_token_at - started) * 1000) if first_token_at else None
         metrics["totalMs"] = round((ended - started) * 1000)
         metrics["throughput"] = round(token_count / max((ended - (first_token_at or ended)), 0.001), 2) if first_token_at else None
-        metrics["outputTokens"] = int(token_count)
+        metrics["outputTokens"] = int(token_count) if token_count is not None else None
         metrics["tokenCountSource"] = token_count_source
         metrics["itlMs"] = round(sum((b - a) * 1000 for a, b in zip(token_times, token_times[1:])) / (len(token_times) - 1)) if len(token_times) > 1 else None
         if token_events and first_token_at:
@@ -275,17 +293,18 @@ async def perform_once(request: dict[str, Any], mode: str) -> dict[str, Any]:
                     duration = max(token_events[index + window_size - 1] - token_events[index], 0.05)
                     peak_speed = max(peak_speed, (window_size - 1) / duration)
                 metrics["peakThroughput"] = round(peak_speed, 2)
-        metrics["ok"] = True
-        metrics["successRate"] = 100
-        metrics["errorRate"] = 0
+        has_output = token_count is not None and token_count > 0
+        metrics["ok"] = has_output
+        metrics["successRate"] = 100 if has_output else 0
+        metrics["errorRate"] = 0 if has_output else 100
         metrics["streamStability"] = "正常" if is_sse and first_token_at else ("无流式 token" if is_sse else "非流式响应")
         metrics["costAccuracy"] = "已返回 usage" if usage else "未提供 usage"
         metrics["responseModel"] = response_model
         metrics["usage"] = usage
         metrics["outputPreview"] = output_text[:500]
         return {
-            "ok": True,
-            "message": f"请求成功，读取到 {int(token_count)} 个输出 token",
+            "ok": has_output,
+            "message": f"请求成功，读取到 {int(token_count)} 个输出 token" if has_output else "HTTP 请求成功，但没有读取到输出 token。渠道可能返回了空流，或使用了未兼容的流式字段。",
             "metrics": metrics,
         }
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:

@@ -304,6 +304,8 @@ async function runChannelCheck(input) {
   const model = String(input?.model || "").trim();
   const prompt = String(input?.prompt || "请用一句话回答：1+1等于几？").trim();
   const rawBase = String(input?.apiBase || "").trim().replace(/\/+$/, "");
+  const requestedMaxTokens = Number(input?.maxTokens);
+  const maxTokens = Math.min(4096, Math.max(16, Number.isFinite(requestedMaxTokens) ? Math.floor(requestedMaxTokens) : 512));
   if (!apiKey) return { ok: false, message: "请填写 API Key" };
   if (!model) return { ok: false, message: "请选择测试模型" };
   if (!rawBase) return { ok: false, message: "请填写 API Base" };
@@ -318,7 +320,7 @@ async function runChannelCheck(input) {
         apiBase: rawBase,
         connectionMode: normalizeConnectionMode(input?.connectionMode, "auto"),
         proxy,
-        maxTokens: 32,
+        maxTokens,
       }),
     });
     const lines = result.stdout.trim().split(/\r?\n/).filter(Boolean);
@@ -359,7 +361,11 @@ async function runChannelCheckBatch(input) {
     results.push(...chunk.map((item, index) => ({ ...item, runIndex: offset + index + 1 })));
   }
   const successful = results.filter((item) => item?.ok && item.metrics);
-  const metricValues = (key) => successful.map((item) => Number(item.metrics[key])).filter((value) => Number.isFinite(value));
+  const metricValues = (key) => successful
+    .map((item) => item.metrics[key])
+    .filter((value) => value !== null && value !== undefined && value !== "")
+    .map((value) => Number(value))
+    .filter((value) => Number.isFinite(value));
   const ttft = metricValues("ttftMs");
   const ttfb = metricValues("ttfbMs");
   const total = metricValues("totalMs");
@@ -367,6 +373,7 @@ async function runChannelCheckBatch(input) {
   const itl = metricValues("itlMs");
   const peakThroughput = metricValues("peakThroughput");
   const peakTps = metricValues("peakTps");
+  const outputTokens = metricValues("outputTokens");
   const successfulCurves = successful
     .map((item) => Array.isArray(item.metrics?.tpsCurve) ? item.metrics.tpsCurve : [])
     .filter((curve) => curve.length);
@@ -390,6 +397,7 @@ async function runChannelCheckBatch(input) {
     p95TtfbMs: percentile(ttfb, 0.95),
     p99TtfbMs: percentile(ttfb, 0.99),
     avgTotalMs: average(total),
+    avgRtmMs: average(total),
     p50TotalMs: percentile(total, 0.5),
     p95TotalMs: percentile(total, 0.95),
     p99TotalMs: percentile(total, 0.99),
@@ -401,6 +409,7 @@ async function runChannelCheckBatch(input) {
     p95Throughput: percentile(throughput, 0.95),
     p99Throughput: percentile(throughput, 0.99),
     avgItlMs: average(itl),
+    totalGeneratedTokens: outputTokens.length ? outputTokens.reduce((sum, value) => sum + value, 0) : null,
     p95ItlMs: percentile(itl, 0.95),
     avgPeakThroughput: average(peakThroughput),
     avgPeakTps: average(peakTps),
