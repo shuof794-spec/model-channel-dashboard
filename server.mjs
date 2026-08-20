@@ -16,7 +16,11 @@ const dataFile = path.join(dataRoot, "index.json");
 const statusFile = path.join(publicRoot, "data", "status.json");
 const downloadFile = path.join(publicRoot, "downloads", "AI_API_models_审查版.xlsx");
 const relaywatchConfigFile = path.join(workspaceRoot, "relaywatch_sites.json");
-const python = process.env.MODEL_DASHBOARD_PYTHON || process.env.PYTHON || "python";
+// Use one configured virtualenv for both data-generation and RelayWatch work.
+// This avoids Windows' App Execution Alias (`python`) returning EACCES when
+// only RELAYWATCH_PYTHON was configured during startup.
+const configuredPython = process.env.MODEL_DASHBOARD_PYTHON || process.env.PYTHON || process.env.RELAYWATCH_PYTHON;
+const python = configuredPython || "python";
 const relayPython = process.env.RELAYWATCH_PYTHON || python;
 const proxy = process.env.BANANA_HTTP_PROXY || "http://127.0.0.1:10090";
 const port = Number(process.env.MODEL_DASHBOARD_API_PORT || 4180);
@@ -35,6 +39,15 @@ const defaultRelaywatchSites = [
 async function writeStatus(status) {
   await fs.mkdir(path.dirname(statusFile), { recursive: true });
   await fs.writeFile(statusFile, JSON.stringify(status, null, 2), "utf8");
+}
+
+async function writeUpdateProgress(startedAt, value, label, detail = "") {
+  await writeStatus({
+    state: "running",
+    startedAt,
+    message: label,
+    progress: { value, label, detail },
+  });
 }
 
 async function loadRelaywatchSites() {
@@ -160,7 +173,7 @@ async function updateAll() {
   if (updateRunning) return { ok: false, message: "更新已在进行中" };
   updateRunning = true;
   const startedAt = new Date().toISOString();
-  await writeStatus({ state: "running", startedAt, message: "正在抓取最新 models 数据" });
+  await writeUpdateProgress(startedAt, 2, "准备更新", "检查数据源和渠道配置");
   const stamp = dateStamp();
   let snapshot = path.join(workspaceRoot, "data_snapshots", `models_providers_${stamp}.json`);
   const relayRaw = path.join(workspaceRoot, "data_snapshots", `relaywatch_raw_${stamp}.json`);
@@ -168,35 +181,68 @@ async function updateAll() {
   const relaySites = await loadRelaywatchSites();
   const outputWorkbook = downloadFile;
   const env = environmentForConnection("proxy");
-  let sourceNotice = "";
+  const sourceNotices = [];
+  const addSourceNotice = (message) => { if (message) sourceNotices.push(message); };
   try {
+    await writeUpdateProgress(startedAt, 8, "正在下载 models.dev 模型数据", "models.dev/api.json · 通过代理连接");
     try {
-      await run(python, ["fetch_data_sources.py", "--date", stamp, "--models-url", "https://models.dev/api.json"], { env });
+      await run(python, ["fetch_data_sources.py", "--date", stamp, "--models-url", "https://models.dev/api.json", "--skip-litellm"], { env });
+      await writeUpdateProgress(startedAt, 24, "models.dev 下载完成", `models_providers_${stamp}.json`);
     } catch (error) {
       const fallbackSnapshot = await findLatestSnapshot("models_providers_");
-      if (!fallbackSnapshot) throw error;
+      if (!fallbackSnapshot) throw new Error(`models.dev 下载失败，且没有可用旧快照：${String(error.message || error).split("\n")[0]}`);
       snapshot = fallbackSnapshot;
-      sourceNotice = `上游数据暂不可用，沿用最近一次 models 快照（${path.basename(fallbackSnapshot)}）`;
+      const notice = `models.dev 下载失败，沿用最近一次快照（${path.basename(fallbackSnapshot)}）`;
+      addSourceNotice(notice);
+      await writeUpdateProgress(startedAt, 24, "models.dev 下载失败，沿用旧快照", notice);
+    }
+    await writeUpdateProgress(startedAt, 28, "正在下载 LiteLLM 辅助数据", "仅作为兼容输入，不会生成 LiteLLM 工作表");
+    try {
+      await run(python, ["fetch_data_sources.py", "--date", stamp, "--litellm-url", "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json", "--skip-models"], { env });
+      await writeUpdateProgress(startedAt, 38, "LiteLLM 下载完成", "辅助价格和上下文数据已保存");
+    } catch (error) {
+      let fallbackLiteLLM = await findLatestSnapshot("LiteLLM_model_prices_and_context_window_");
+      if (!fallbackLiteLLM) {
+        const bundledLiteLLM = path.join(workspaceRoot, "LiteLLM_model_prices_and_context_window_20260813.json");
+        try {
+          const stat = await fs.stat(bundledLiteLLM);
+          if (stat.size > 1000) fallbackLiteLLM = bundledLiteLLM;
+        } catch {
+          // No bundled fallback is available.
+        }
+      }
+      if (!fallbackLiteLLM) throw new Error(`LiteLLM 下载失败，且没有可用旧快照：${String(error.message || error).split("\n")[0]}`);
+      const notice = `LiteLLM 下载失败，沿用最近一次快照（${path.basename(fallbackLiteLLM)}）`;
+      addSourceNotice(notice);
+      await writeUpdateProgress(startedAt, 38, "LiteLLM 下载失败，沿用旧快照", notice);
     }
     const groupedSites = new Map([["direct", []], ["proxy", []], ["auto", []]]);
     relaySites.forEach((site) => {
       if (site?.url) groupedSites.get(normalizeConnectionMode(site.connectionMode, "proxy")).push(site);
     });
-    await runRelaywatchRefresh(groupedSites.get("direct"), relayRaw, "direct");
-    await runRelaywatchRefresh(groupedSites.get("proxy"), relayRaw, "proxy");
+    const directSites = groupedSites.get("direct");
+    const proxySites = groupedSites.get("proxy");
     const autoSites = groupedSites.get("auto");
+    await writeUpdateProgress(startedAt, 43, "正在抓取 RelayWatch 直连渠道", `${directSites.length} 个渠道`);
+    await runRelaywatchRefresh(directSites, relayRaw, "direct");
+    await writeUpdateProgress(startedAt, 52, "正在抓取 RelayWatch 代理渠道", `${proxySites.length} 个渠道`);
+    await runRelaywatchRefresh(proxySites, relayRaw, "proxy");
     if (autoSites.length) {
+      await writeUpdateProgress(startedAt, 61, "正在测试自动连接渠道", `${autoSites.length} 个渠道 · 先直连`);
       await runRelaywatchRefresh(autoSites, relayRaw, "direct");
       const rows = await readRelayRows(relayRaw);
       const failedOrigins = new Set(rows.filter((row) => !row.any_ok).map((row) => row.requested_origin || row.origin));
+      await writeUpdateProgress(startedAt, 68, "正在重试自动连接失败渠道", `${failedOrigins.size} 个渠道 · 切换代理`);
       await runRelaywatchRefresh(autoSites.filter((site) => failedOrigins.has(site.url)), relayRaw, "proxy");
     }
+    await writeUpdateProgress(startedAt, 74, "正在标准化渠道数据", "生成 RelayWatch 统一数据结构");
     await run(relayPython, [
       "normalize_data.py",
       "--input", relayRaw,
       "--out-dir", relayNormalized,
       "--full-models",
     ], { cwd: path.join(workspaceRoot, "relaywatch"), env: process.env });
+    await writeUpdateProgress(startedAt, 84, "正在生成 Excel 价格表", "应用模型映射、汇率和计价单位");
     await run(python, [
       "gen_two_tables.py",
       "--litellm", await findLatestSnapshot("LiteLLM_model_prices_and_context_window_") || path.join(workspaceRoot, "LiteLLM_model_prices_and_context_window_20260813.json"),
@@ -208,15 +254,17 @@ async function updateAll() {
       "--relaywatch-config", relaywatchConfigFile,
       "--out", outputWorkbook,
     ], { cwd: workspaceRoot, env: process.env });
+    await writeUpdateProgress(startedAt, 94, "正在生成网站本地数据", "拆分横向对比和最低价数据分片");
     await run(python, [path.join(appRoot, "scripts", "prepare_data.py"), "--workbook", outputWorkbook], { cwd: workspaceRoot, env: process.env });
     const finishedAt = new Date().toISOString();
-    const message = sourceNotice ? `数据已更新；${sourceNotice}` : "数据已更新";
-    await writeStatus({ state: "success", startedAt, finishedAt, message, source: snapshot });
+    const message = sourceNotices.length ? `数据已更新；${sourceNotices.join("；")}` : "数据已更新";
+    await writeStatus({ state: "success", startedAt, finishedAt, message, source: snapshot, progress: { value: 100, label: "更新完成", detail: "Excel 和网站本地数据已同步" } });
     return { ok: true, finishedAt, message };
   } catch (error) {
     const finishedAt = new Date().toISOString();
-    await writeStatus({ state: "error", startedAt, finishedAt, message: String(error.message || error) });
-    return { ok: false, message: String(error.message || error) };
+    const message = String(error.message || error);
+    await writeStatus({ state: "error", startedAt, finishedAt, message, progress: { value: 0, label: "更新失败", detail: message.split("\n")[0] } });
+    return { ok: false, message };
   } finally {
     updateRunning = false;
   }

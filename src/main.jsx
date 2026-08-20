@@ -97,6 +97,7 @@ function dataConnectionLog(status, data) {
     `最低价分片：/data/best/`,
     `Excel 导出：/downloads/workbook.xlsx`,
   ];
+  if (status?.progress?.label) lines.push(`更新进度：${status.progress.value ?? "-"}% · ${status.progress.label}${status.progress.detail ? ` · ${status.progress.detail}` : ""}`);
   if (status?.message) lines.push(`最近日志：${status.message}`);
   return lines.join("\n");
 }
@@ -108,6 +109,22 @@ function DataConnectionStatus({ status, data }) {
       <span className="status-dot"></span>
       <div><strong>{stateLabel}</strong><small>{status.state === "error" ? "保留上次快照" : formatDate(data?.meta?.updatedAt)}</small></div>
       <div className="connection-tooltip" role="tooltip"><strong>本地数据日志</strong><pre>{dataConnectionLog(status, data)}</pre></div>
+    </div>
+  );
+}
+
+function UpdateProgress({ status, isRefreshing }) {
+  const showFailure = status?.state === "error" && status?.progress?.label === "更新失败";
+  if (!isRefreshing && status?.state !== "running" && !showFailure) return null;
+  const rawValue = Number(status?.progress?.value);
+  const value = Number.isFinite(rawValue) ? Math.max(2, Math.min(99, rawValue)) : 3;
+  const label = status?.progress?.label || status?.message || "正在连接更新服务";
+  const detail = status?.progress?.detail || "等待后端返回更新阶段";
+  return (
+    <div className={`update-progress ${showFailure ? "is-error" : ""}`} role="status" aria-live="polite">
+      <div className="update-progress-head"><strong>{label}</strong><span>{Math.round(value)}%</span></div>
+      <div className="update-progress-track"><span style={{ width: `${value}%` }}></span></div>
+      <small>{detail}</small>
     </div>
   );
 }
@@ -569,7 +586,7 @@ function Pager({ page, pageCount, onChange, label }) {
   );
 }
 
-function Overview({ data, loadedPages, onLoadPage, onRefresh, isRefreshing, onDetectChannel }) {
+function Overview({ data, loadedPages, onLoadPage, onRefresh, isRefreshing, status, onDetectChannel }) {
   const comparisonPages = loadedPages.comparison;
   const [filters, setFilters] = useState({ models: [], suppliers: [], vendors: [], modelSeries: [] });
   const [currency, setCurrency] = useState("usd");
@@ -659,6 +676,7 @@ function Overview({ data, loadedPages, onLoadPage, onRefresh, isRefreshing, onDe
   return (
     <div className="overview-view">
       <div className="page-heading"><div><p className="eyebrow">Price comparison</p><h1>模型渠道价格对比</h1><p className="page-subtitle">按模型系列、生产商和渠道筛选，并直接比较同一模型的渠道价格</p></div><div className="heading-actions"><Button icon={Download} title="下载当前 Excel 工作簿" onClick={() => { window.location.href = "/downloads/workbook.xlsx"; }}>导出 Excel</Button><Button variant="primary" icon={RefreshCw} title="立即运行数据更新" onClick={onRefresh} disabled={isRefreshing}>{isRefreshing ? "更新中" : "更新数据"}</Button></div></div>
+      <UpdateProgress status={status} isRefreshing={isRefreshing} />
       <div className="stats-row"><Stat icon={Database} accent="accent-blue" value={data.meta.modelCount.toLocaleString()} label="模型名" detail="models 数据" /><Stat icon={Server} accent="accent-mint" value={data.meta.supplierCount.toLocaleString()} label="渠道" detail="可比较渠道" /><Stat icon={Tag} accent="accent-yellow" value={data.meta.vendorCount.toLocaleString()} label="生产商" detail="模型生产商" /><Stat icon={Clock3} accent="accent-coral" value={formatDate(data.meta.updatedAt)} label="上次更新" detail="每 3 小时自动检查" /></div>
       <section className="comparison-section"><div className="section-heading"><div><p className="eyebrow">Cross-provider matrix</p><h2>横向对比</h2></div><div className="currency-switch"><span>显示币种</span><button className={currency === "usd" ? "active" : ""} onClick={() => setCurrency("usd")}>USD / 1M</button><button className={currency === "cny" ? "active" : ""} onClick={() => setCurrency("cny")}>CNY / 1M</button></div></div>
         <div className="comparison-help"><span className="help-sort"><ArrowUpDown size={14} />点击“价格类型”右侧的排序按钮，可按当前模型的输入、输出、缓存读或缓存写价格重排渠道；再次点击切换升序/降序。</span><span className="help-color"><i className="legend-swatch low"></i>浅绿色 = 价格较低 <i className="legend-swatch high"></i>浅红色 = 价格较高</span></div>
@@ -908,7 +926,21 @@ function App() {
       setStatus({ state: "error", message: error.message });
     }
   }, []);
+  const loadStatus = useCallback(async () => {
+    try {
+      const response = await fetch("/api/status", { cache: "no-store" });
+      if (response.ok) setStatus(await response.json());
+    } catch {
+      // The main update request reports the final error; transient status polling failures are ignored.
+    }
+  }, []);
   useEffect(() => { loadData(); const timer = setInterval(loadData, 30000); return () => clearInterval(timer); }, [loadData]);
+  useEffect(() => {
+    if (!isRefreshing) return undefined;
+    loadStatus();
+    const timer = setInterval(loadStatus, 800);
+    return () => clearInterval(timer);
+  }, [isRefreshing, loadStatus]);
   useEffect(() => {
     pageRequests.current.clear();
     setLoadedPages({ comparison: {}, best: {} });
@@ -933,20 +965,16 @@ function App() {
 
   const refresh = async (reportProgress) => {
     setIsRefreshing(true);
-    setStatus({ state: "running", message: "正在抓取最新数据" });
-    reportProgress?.({ value: 45, label: "正在抓取最新模型数据" });
+    setStatus({ state: "running", message: "准备更新", progress: { value: 2, label: "准备更新", detail: "等待后端开始处理" } });
     try {
       const response = await fetch("/api/update", { method: "POST" });
       const result = await response.json();
       if (!result.ok) throw new Error(result.message || "更新失败");
-      reportProgress?.({ value: 86, label: "正在生成价格对比表" });
       await loadData();
-      reportProgress?.({ value: 100, label: "价格数据同步完成" });
       return { ok: true, message: result.message || "数据已更新", finishedAt: result.finishedAt };
     } catch (error) {
       const message = error.message || "更新失败";
       setStatus({ state: "error", message });
-      reportProgress?.({ value: 100, label: "更新失败，已保留上次数据" });
       return { ok: false, message };
     } finally { setIsRefreshing(false); }
   };
@@ -1033,7 +1061,7 @@ function App() {
   return (
     <div className="app-shell">
       <aside className="sidebar"><div className="brand-mark"><div className="brand-symbol"><span></span><span></span><span></span></div><div><strong>Model Ledger</strong><small>API price intelligence</small></div></div><nav className="primary-nav"><button className={view === "overview" ? "active" : ""} onClick={() => setView("overview")}><LayoutDashboard size={18} />模型渠道价格对比</button><button className={view === "check" ? "active" : ""} onClick={() => { setCheckPrefill(null); setView("check"); }}><Gauge size={18} />渠道检测</button><button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")}><Settings2 size={18} />渠道管理</button></nav><div className="sidebar-bottom"><DataConnectionStatus status={status} data={data} /><div className="sidebar-note"><SlidersHorizontal size={15} /><span>代理只用于后台抓取，页面保持本地直连</span></div></div></aside>
-      <main className="main-content"><header className="mobile-header"><div className="brand-symbol"><span></span><span></span><span></span></div><strong>Model Ledger</strong><div className="mobile-nav"><button className={view === "overview" ? "active" : ""} onClick={() => setView("overview")} title="模型渠道价格对比"><LayoutDashboard size={17} /></button><button className={view === "check" ? "active" : ""} onClick={() => { setCheckPrefill(null); setView("check"); }} title="渠道检测"><Gauge size={17} /></button><button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")} title="渠道管理"><Settings2 size={17} /></button></div></header><div className="content-wrap">{view === "overview" ? <Overview data={data} loadedPages={loadedPages} onLoadPage={loadPage} onRefresh={refresh} isRefreshing={isRefreshing} onDetectChannel={openChannelCheck} /> : view === "check" ? <ChannelCheckView channels={channels} data={data} history={detectionHistory} onRecord={recordDetection} prefill={checkPrefill} /> : <SettingsView channels={channels} onSaveChannel={saveChannel} playwrightImport={playwrightImport} onStagePlaywrightImport={stagePlaywrightImport} onClearPlaywrightImport={clearPlaywrightImport} />}</div></main>
+      <main className="main-content"><header className="mobile-header"><div className="brand-symbol"><span></span><span></span><span></span></div><strong>Model Ledger</strong><div className="mobile-nav"><button className={view === "overview" ? "active" : ""} onClick={() => setView("overview")} title="模型渠道价格对比"><LayoutDashboard size={17} /></button><button className={view === "check" ? "active" : ""} onClick={() => { setCheckPrefill(null); setView("check"); }} title="渠道检测"><Gauge size={17} /></button><button className={view === "settings" ? "active" : ""} onClick={() => setView("settings")} title="渠道管理"><Settings2 size={17} /></button></div></header><div className="content-wrap">{view === "overview" ? <Overview data={data} loadedPages={loadedPages} onLoadPage={loadPage} onRefresh={refresh} isRefreshing={isRefreshing} status={status} onDetectChannel={openChannelCheck} /> : view === "check" ? <ChannelCheckView channels={channels} data={data} history={detectionHistory} onRecord={recordDetection} prefill={checkPrefill} /> : <SettingsView channels={channels} onSaveChannel={saveChannel} playwrightImport={playwrightImport} onStagePlaywrightImport={stagePlaywrightImport} onClearPlaywrightImport={clearPlaywrightImport} />}</div></main>
     </div>
   );
 }

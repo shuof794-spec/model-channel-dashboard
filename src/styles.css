@@ -72,6 +72,20 @@ a { color: inherit; }
 .button-primary { background: var(--navy); border-color: var(--navy); color: white; }
 .button-primary:hover { background: #203953; border-color: #203953; }
 
+.update-progress { margin: -8px 0 24px; padding: 11px 13px 10px; border: 1px solid #d7e7dd; background: #f7fbf8; color: #60766c; }
+.update-progress-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 11px; }
+.update-progress-head strong { color: #39775c; font-weight: 700; }
+.update-progress-head span { color: #5d9076; font-variant-numeric: tabular-nums; }
+.update-progress-track { height: 7px; margin-top: 8px; overflow: hidden; border-radius: 99px; background: #e1eee6; }
+.update-progress-track span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #6cad8e, #9fcfb0); transition: width .45s ease; }
+.update-progress small { display: block; margin-top: 7px; color: #899b91; font-size: 9px; line-height: 1.45; overflow-wrap: anywhere; }
+.update-progress.is-error { border-color: #f0d3ce; background: #fff7f5; }
+.update-progress.is-error .update-progress-head strong { color: #a55a4f; }
+.update-progress.is-error .update-progress-head span { color: #b56b61; }
+.update-progress.is-error .update-progress-track { background: #f5e2df; }
+.update-progress.is-error .update-progress-track span { background: #dd8b7e; }
+.update-progress.is-error small { color: #a87972; }
+
 .stats-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); background: rgba(255,255,255,.5); margin-bottom: 36px; }
 .stat-block { min-height: 94px; padding: 17px 16px; display: flex; align-items: center; gap: 11px; border-right: 1px solid var(--line); position: relative; }
 .stat-block:last-child { border-right: 0; }
