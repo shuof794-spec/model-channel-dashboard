@@ -11,23 +11,54 @@
 - **定时更新**：API 服务每 3 小时自动更新一次，也可以在界面中手动更新；更新失败时会保留最近一次可用快照。
 - **本地导出**：生成的审查版 Excel 保存在 `public/downloads/`，可从网站直接下载。
 
+## 快速部署（推荐）
+
+在新电脑上完成部署只需两步：
+
+### 1. 运行部署向导
+
+```powershell
+cd "model-channel-dashboard"
+powershell -ExecutionPolicy Bypass -File "setup.ps1"
+```
+
+向导会自动完成：
+
+- ✅ 检测 Node.js 和 Python 环境
+- ✅ 扫描本机 VPN / 代理端口（Clash、V2Ray、云鸟等）
+- ✅ 交互式选择代理端口和 API 端口
+- ✅ 安装 npm 和 Python 依赖
+- ✅ 保存配置到 `config.json`
+- ✅ 生成 `start.bat` 和 `stop.bat`
+
+### 2. 启动服务
+
+双击 **`start.bat`** 即可启动全部服务。
+
+停止服务：双击 **`stop.bat`**。
+
 ## 目录结构
 
 ```text
-model-dashboard-release/
-├─ src/                         React 页面和样式
-├─ public/data/                 当前离线展示数据（JSON 分页文件）
-├─ public/downloads/            当前审查版 Excel
-├─ scripts/                     前端数据准备、渠道探针
-├─ relaywatch/                  RelayWatch 抓取和标准化脚本
-├─ server.mjs                   本地 API、更新任务、检测接口
-├─ fetch_data_sources.py        下载 models.dev/LiteLLM 快照
-├─ gen_two_tables.py            生成统一格式 Excel
-├─ model_mapping.csv            人工模型名映射
-├─ channel_rates.csv            渠道汇率、计价单位和倍率
-├─ relaywatch_sites.json        RelayWatch 渠道配置
-├─ vendor_model_*.csv           厂商和模型系列归一化词表
-├─ package.json                 Node/Vite 依赖与命令
+model-channel-dashboard/
+├─ setup.ps1               部署向导脚本（首次运行）
+├─ config.json             端口和环境配置（自动生成，已加入 .gitignore）
+├─ start.bat               一键启动（自动生成）
+├─ stop.bat                一键停止（自动生成）
+├─ src/                    React 页面和样式
+├─ public/data/            当前离线展示数据（JSON 分页文件）
+├─ public/downloads/       当前审查版 Excel
+├─ scripts/                前端数据准备、渠道探针
+├─ relaywatch/             RelayWatch 抓取和标准化脚本
+├─ server.mjs              本地 API、更新任务、检测接口
+├─ fetch_data_sources.py   下载 models.dev/LiteLLM 快照
+├─ gen_two_tables.py       生成统一格式 Excel
+├─ model_mapping.csv       人工模型名映射
+├─ channel_rates.csv       渠道汇率、计价单位和倍率
+├─ relaywatch_sites.json   RelayWatch 渠道配置
+├─ vendor_model_*.csv      厂商和模型系列归一化词表
+├─ vite.config.js          自动读取 config.json 的端口配置
+├─ package.json            Node/Vite 依赖与命令
 └─ README.md
 ```
 
@@ -35,72 +66,44 @@ model-dashboard-release/
 
 - Windows 10/11
 - Node.js 18 或更高版本（推荐 LTS）
-- Python 3.10 或更高版本
+- Python 3.10 或更高版本（可选，用于数据抓取）
 - 访问外部数据源时，需要可用的网络连接；`models.dev` 等站点可能需要代理。
 
-## 安装
+## 配置文件
 
-在 PowerShell 中进入本目录：
+部署向导会生成 `config.json`，所有端口和环境配置集中在此：
 
-```powershell
-cd "E:\资料\大一下\Temp\model-dashboard-release"
-npm install
-
-# 推荐为数据抓取建立独立 Python 环境
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r relaywatch\requirements.txt
-
-# 检查前端生产构建
-npm run build
+```json
+{
+  "apiPort": 4180,
+  "frontendPort": 4173,
+  "proxyUrl": "http://127.0.0.1:17890",
+  "pythonPath": ".venv\\Scripts\\python.exe"
+}
 ```
 
-如果电脑已经有满足要求的 Python，也可以直接安装依赖，不创建虚拟环境：
+| 字段 | 说明 | 默认值 |
+|------|------|--------|
+| `apiPort` | API 服务端口 | 4180 |
+| `frontendPort` | Vite 前端端口 | 4173 |
+| `proxyUrl` | VPN 代理地址（空字符串 = 不使用） | 空 |
+| `pythonPath` | Python 可执行文件路径 | 空（自动检测） |
+
+### 修改配置
+
+- **重新运行向导**：`powershell -ExecutionPolicy Bypass -File "setup.ps1"`
+- **手动编辑**：直接修改 `config.json`
+- **命令行临时指定**：
 
 ```powershell
-python -m pip install -r relaywatch\requirements.txt
-```
-
-## 启动网站
-
-网站由 API 服务和 Vite 前端组成，需要分别启动两个进程。先开 API：
-
-```powershell
-cd "E:\资料\大一下\Temp\model-dashboard-release"
-$env:MODEL_DASHBOARD_PYTHON = "$PWD\.venv\Scripts\python.exe"
-$env:RELAYWATCH_PYTHON = "$PWD\.venv\Scripts\python.exe"
-npm run start
-```
-
-再开一个 PowerShell 窗口启动前端：
-
-```powershell
-cd "E:\资料\大一下\Temp\model-dashboard-release"
-npm run dev
-```
-
-浏览器打开 [http://127.0.0.1:4173/](http://127.0.0.1:4173/)。API 默认监听 `http://127.0.0.1:4180/`，Vite 会把 `/api`、`/data` 和 `/downloads` 请求转发到 API。
-
-也可以不使用虚拟环境，让 Node 直接调用系统 Python：
-
-```powershell
+$env:MODEL_DASHBOARD_API_PORT = "4181"
+$env:BANANA_HTTP_PROXY = "http://127.0.0.1:17890"
 npm run start
 ```
 
 ## 端口和代理
 
-端口可以通过环境变量修改：
-
-```powershell
-$env:MODEL_DASHBOARD_API_PORT = "4181"
-npm run start
-```
-
-RelayWatch 默认使用 Banana VPN 的本地 HTTP 代理 `http://127.0.0.1:10090`。如果代理端口不同，启动 API 前修改：
-
-```powershell
-$env:BANANA_HTTP_PROXY = "http://127.0.0.1:端口"
-npm run start
-```
+`vite.config.js` 会自动读取 `config.json` 中的端口，前端代理无需手动修改。
 
 每个渠道都有连接方式：
 
@@ -110,9 +113,46 @@ npm run start
 
 API Key 只在检测请求期间使用，不会写入配置文件或提交到 GitHub。不要把真实密钥写进 CSV、JSON 或 README。
 
+## 手动安装（进阶）
+
+如果不想使用部署向导，也可以手动安装：
+
+```powershell
+cd "model-channel-dashboard"
+npm install
+
+# 为数据抓取建立独立 Python 环境（可选）
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r relaywatch\requirements.txt
+
+# 检查前端生产构建
+npm run build
+```
+
+### 手动启动
+
+**终端 1 — API 服务**：
+
+```powershell
+cd "model-channel-dashboard"
+$env:MODEL_DASHBOARD_PYTHON = "$PWD\.venv\Scripts\python.exe"
+$env:RELAYWATCH_PYTHON = "$PWD\.venv\Scripts\python.exe"
+$env:BANANA_HTTP_PROXY = "http://127.0.0.1:代理端口"
+npm run start
+```
+
+**终端 2 — 前端**：
+
+```powershell
+cd "model-channel-dashboard"
+npm run dev
+```
+
+浏览器打开 [http://127.0.0.1:4173/](http://127.0.0.1:4173/)。
+
 ## 数据更新流程
 
-点击网站中的“更新数据”或调用 `POST /api/update` 后，服务按以下顺序执行：
+点击网站中的"更新数据"或调用 `POST /api/update` 后，服务按以下顺序执行：
 
 1. `fetch_data_sources.py` 下载 `models.dev` 和 LiteLLM 数据到 `data_snapshots/`。
 2. `relaywatch/refresh_sites.py` 按渠道的连接方式抓取状态、模型和价格原始数据。
@@ -126,7 +166,7 @@ API Key 只在检测请求期间使用，不会写入配置文件或提交到 Gi
 
 ### 在网页中添加
 
-进入“渠道管理”，选择 RelayWatch 抓取，填写站点地址、名称、API Base、计价单位、汇率和连接方式，点击“尝试访问”。访问成功后配置会写入 `relaywatch_sites.json`，随后手动更新数据即可出现在价格对比表中。
+进入"渠道管理"，选择 RelayWatch 抓取，填写站点地址、名称、API Base、计价单位、汇率和连接方式，点击"尝试访问"。访问成功后配置会写入 `relaywatch_sites.json`，随后手动更新数据即可出现在价格对比表中。
 
 ### 手工编辑
 
@@ -139,29 +179,40 @@ API Key 只在检测请求期间使用，不会写入配置文件或提交到 Gi
 ## 常用命令
 
 ```powershell
-npm run dev       # Vite 开发服务器，端口 4173
-npm run start     # 数据 API，端口 4180
-npm run build     # 前端生产构建，输出 dist/
+powershell -ExecutionPolicy Bypass -File "setup.ps1"   # 部署向导
+.\start.bat                                              # 一键启动
+.\stop.bat                                               # 一键停止
+npm run dev          # Vite 开发服务器，端口见 config.json
+npm run start        # 数据 API，端口见 config.json
+npm run build        # 前端生产构建，输出 dist/
 node --check server.mjs
 python -m py_compile fetch_data_sources.py gen_two_tables.py scripts\prepare_data.py scripts\channel_probe.py relaywatch\refresh_sites.py relaywatch\normalize_data.py
 ```
+
+## 环境变量参考
+
+| 变量名 | 说明 | 默认值 |
+|--------|------|--------|
+| `MODEL_DASHBOARD_API_PORT` | API 端口 | 4180 |
+| `VITE_PORT` | 前端端口 | 4173 |
+| `BANANA_HTTP_PROXY` | HTTP 代理 | `http://127.0.0.1:10090` |
+| `MODEL_DASHBOARD_PYTHON` | Python 路径 | `python` |
+| `RELAYWATCH_PYTHON` | RelayWatch Python 路径 | 同上 |
 
 ## 故障排查
 
 ### 页面打不开
 
-确认 API 和 Vite 两个窗口都在运行。若 4173 或 4180 已被占用，修改 Vite 配置或 `MODEL_DASHBOARD_API_PORT`，并保持代理端口一致。
+确认 `start.bat` 启动了两个窗口（API + Vite）。若端口被占用，运行 `setup.ps1` 重新选择端口，或手动编辑 `config.json`。
 
-### 显示“读取失败”或更新卡住
+### 显示"读取失败"或更新卡住
 
 1. 先在浏览器直接打开站点，确认地址和 API Base 正确。
 2. 国内站点使用 `direct`，需要代理的站点使用 `proxy`，不确定时使用 `auto`。
-3. 检查 `BANANA_HTTP_PROXY` 的端口，确认 Banana VPN 正在监听该端口。
+3. 运行 `setup.ps1` 重新选择代理端口，或手动编辑 `config.json` 修改 `proxyUrl`。
 4. 检查 API 启动窗口的错误信息；详细原始响应在 `data_snapshots/` 中。
 
 ### Python 找不到或缺少模块
-
-确认启动 API 前设置了 `MODEL_DASHBOARD_PYTHON` 和 `RELAYWATCH_PYTHON`，并执行：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install -r relaywatch\requirements.txt
@@ -176,7 +227,7 @@ python -m py_compile fetch_data_sources.py gen_two_tables.py scripts\prepare_dat
 发布目录已经是一个干净的 Git 仓库，当前分支为 `main`，远端地址为 `https://github.com/shuof794-spec/model-channel-dashboard.git`。如果仓库尚未创建，请先在 GitHub 新建同名的空仓库（建议设为 Private，不要自动生成 README），然后在 PowerShell 中执行：
 
 ```powershell
-cd "E:\资料\大一下\Temp\model-dashboard-release"
+cd "model-channel-dashboard"
 git push -u origin main
 ```
 
@@ -190,7 +241,7 @@ PAT 至少需要对目标仓库有 Contents: Read and write 权限。不要把 T
 
 ## GitHub 安全说明
 
-仓库只应包含源码、配置模板和当前公开展示数据。`node_modules/`、Python 虚拟环境、浏览器 profile、历史抓取快照和本地密钥已在 `.gitignore` 中排除。上传前请检查：
+仓库只应包含源码、配置模板和当前公开展示数据。`node_modules/`、Python 虚拟环境、`config.json`（本地配置）、浏览器 profile、历史抓取快照和本地密钥已在 `.gitignore` 中排除。上传前请检查：
 
 ```powershell
 Get-ChildItem -Recurse -File | Select-String -Pattern 'sk-[A-Za-z0-9]{20,}|Bearer\s+[A-Za-z0-9._-]{20,}'
